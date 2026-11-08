@@ -28,3 +28,13 @@ qa/probes/
 .claude/settings.local.json
 .DS_Store
 Thumbs.db
+
+# More local/secret/editor files (QA phase 0 L1)
+.env.*
+!.env.example
+.vscode/
+.idea/
+
+# Processed geodata must never be committed (tiny synthetic fixtures excepted)
+*.parquet
+!tests/fixtures/**/*.parquet
