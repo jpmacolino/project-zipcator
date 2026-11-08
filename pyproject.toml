@@ -49,6 +49,7 @@ packages = ["src/zipcator"]
 # ---------------------------------------------------------------- pytest
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["tests"]
 addopts = "-ra --strict-markers --strict-config -m 'not data and not network and not slow and not visual'"
 markers = [
     "data: needs the built data artifact (data/zcta.parquet)",
