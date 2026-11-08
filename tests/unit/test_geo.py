@@ -113,7 +113,7 @@ def test_geodesic_distance_matches_independent_solver(
     p1: tuple[float, float], p2: tuple[float, float]
 ) -> None:
     ref_m = Geodesic.WGS84.Inverse(p1[0], p1[1], p2[0], p2[1])["s12"]
-    assert geo.geodesic_distance_mi(*p1, *p2) == pytest.approx(ref_m / MILE_M, rel=0.005)
+    assert geo.geodesic_distance_mi(*p1, *p2) == pytest.approx(ref_m / MILE_M, rel=1e-6)
 
 
 @pytest.mark.parametrize(

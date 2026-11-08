@@ -78,9 +78,9 @@ def test_circle_split_by_straight_edge_matches_analytic_segment() -> None:
     res = find_zips(gdf, TAMPA, 10)
     zip_area = (100_000 - a) * 100_000
     expected = circle_segment_area(R10, a) / zip_area * 100
-    assert _row(res, "33602").overlap_pct == pytest.approx(expected, abs=0.5)
+    assert _row(res, "33602").overlap_pct == pytest.approx(expected, abs=0.05)
     assert _row(res, "33602").area_in_radius_sq_mi == pytest.approx(
-        circle_segment_area(R10, a) / MILE_M**2, rel=0.005
+        circle_segment_area(R10, a) / MILE_M**2, rel=0.002
     )
 
 
@@ -94,7 +94,7 @@ def test_two_zips_tiling_a_strip_sum_to_disc_minus_caps() -> None:
     total = _row(res, "33603").area_in_radius_sq_mi + _row(res, "33604").area_in_radius_sq_mi
     caps = 2 * circle_segment_area(R10, 9_000)
     expected = (math.pi * R10**2 - caps) / MILE_M**2
-    assert total == pytest.approx(expected, rel=0.005)
+    assert total == pytest.approx(expected, rel=0.002)
 
 
 def test_small_polygon_overlap_matches_high_resolution_planar_circle() -> None:
@@ -104,7 +104,7 @@ def test_small_polygon_overlap_matches_high_resolution_planar_circle() -> None:
     res = find_zips(gdf, TAMPA, 10)
     disc = Point(0, 0).buffer(R10, quad_segs=25_000)
     expected = disc.intersection(zone).area / zone.area * 100
-    assert _row(res, "33605").overlap_pct == pytest.approx(expected, abs=0.5)
+    assert _row(res, "33605").overlap_pct == pytest.approx(expected, abs=0.05)
 
 
 def test_overlap_matches_independent_geodesic_sampling() -> None:
@@ -144,7 +144,9 @@ def test_big_polygon_containing_center_with_far_rep_point_is_included() -> None:
     assert row.contains_center
     assert row.center_distance_mi > 10, "test setup: rep point must be outside the circle"
     assert row.nearest_distance_mi == 0
-    assert 0 < row.overlap_pct < 5
+    zone = box(-5_000, -5_000, 120_000, 120_000)
+    expected = Point(0, 0).buffer(R10, quad_segs=25_000).intersection(zone).area / zone.area * 100
+    assert row.overlap_pct == pytest.approx(expected, abs=0.02)  # independent planar disc
     assert res.home_zip == "59001"
 
 
@@ -247,7 +249,11 @@ def test_non_conus_and_other_centers_give_correct_overlap(name: str) -> None:
     gdf = make_gdf({"00001": box(a, -50_000, 100_000, 50_000)}, center)
     res = find_zips(gdf, center, 10)
     expected = circle_segment_area(R10, a) / ((100_000 - a) * 100_000) * 100
-    assert _row(res, "00001").overlap_pct == pytest.approx(expected, abs=0.5)
+    assert _row(res, "00001").overlap_pct == pytest.approx(expected, abs=0.05)
+    # Area is asserted too: a few-percent area error at AK/HI/PR must not hide behind the %.
+    assert _row(res, "00001").area_in_radius_sq_mi == pytest.approx(
+        circle_segment_area(R10, a) / MILE_M**2, rel=0.002
+    )
 
 
 def test_leading_zero_zip_stays_a_string() -> None:
@@ -319,9 +325,16 @@ def test_missing_population_gives_none_total_and_nan_estimate() -> None:
     assert math.isnan(float(res.matches.iloc[0].est_population_in_radius))
 
 
-def test_circle_returned_for_map_is_the_geodesic_polygon() -> None:
-    res = find_zips(make_gdf({"33601": box(-1000, -1000, 1000, 1000)}), TAMPA, 10)
-    assert res.circle.equals(geo.geodesic_circle(*TAMPA, 10))
+def test_circle_returned_for_map_matches_the_area_the_search_used() -> None:
+    """A ZIP that swallows the whole circle yields area_in_radius == pi r² (independent
+    formula), and the returned map polygon is the same shape: its vertices are 10 mi from
+    the center per geographiclib, so map and math cannot disagree."""
+    res = find_zips(make_gdf({"33601": box(-100_000, -100_000, 100_000, 100_000)}), TAMPA, 10)
+    assert res.matches.iloc[0].area_in_radius_sq_mi == pytest.approx(math.pi * 100, rel=0.002)
+    assert res.circle.contains(Point(TAMPA[1], TAMPA[0]))
+    for x, y in list(res.circle.exterior.coords)[::37]:
+        d = Geodesic.WGS84.Inverse(TAMPA[0], TAMPA[1], y, x)["s12"]
+        assert d == pytest.approx(R10, abs=0.1)
     assert len(res.circle.exterior.coords) - 1 >= 128
     assert res.center == TAMPA
     assert res.radius_mi == 10
@@ -500,3 +513,39 @@ def test_zip_matches_carries_population() -> None:
     (m,) = find_zips(gdf, TAMPA, 10).zip_matches()
     assert m.population == 500
     assert m.est_population_in_radius == pytest.approx(500.0, abs=0.1)
+
+
+@settings(
+    max_examples=40,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow, HealthCheck.data_too_large],
+)
+@given(
+    rects=st.lists(rect_strategy, min_size=1, max_size=6),
+    lat=st.floats(-60, 70),
+    lon=st.floats(-170, 170),
+    radius=st.floats(0.5, 40),
+    min_pct=st.floats(0, 100),
+)
+def test_properties_random_centers_and_min_overlap_filter(
+    rects: list[tuple[float, float, float, float]],
+    lat: float,
+    lon: float,
+    radius: float,
+    min_pct: float,
+) -> None:
+    """Anywhere on the globe: filter partitions the overlap set, home ZIP is exempt."""
+    zones = {f"{i:05d}": box(x, y, x + w, y + h) for i, (x, y, w, h) in enumerate(rects)}
+    gdf = make_gdf(zones, (lat, lon))
+    everything = find_zips(gdf, (lat, lon), radius)
+    res = find_zips(gdf, (lat, lon), radius, min_overlap_pct=min_pct)
+    shown, hidden = set(res.matches["zip"]), set(res.excluded["zip"])
+    assert shown.isdisjoint(hidden)
+    assert shown | hidden == set(everything.matches["zip"])
+    pct = dict(zip(everything.matches["zip"], everything.matches["overlap_pct"], strict=True))
+    home = set(everything.matches.loc[everything.matches["contains_center"], "zip"])
+    assert home <= shown  # the ZIP containing the center is never filtered out
+    for z in shown - home:
+        assert pct[z] >= min_pct - 1e-6
+    for z in hidden:
+        assert pct[z] < min_pct
