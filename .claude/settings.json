@@ -12,6 +12,11 @@
       "Bash(git log:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
+      "Bash(git config user.email)",
+      "Bash(git config user.name)",
+      "Bash(git config --get:*)",
+      "Bash(git show:*)",
+      "Bash(git tag:*)",
       "WebFetch(domain:www2.census.gov)",
       "WebFetch(domain:www.census.gov)",
       "WebFetch(domain:geocoding.geo.census.gov)",
@@ -24,7 +29,12 @@
     ],
     "ask": [
       "Bash(git push:*)",
-      "Bash(gh repo create:*)"
+      "Bash(gh repo create:*)",
+      "Bash(git remote:*)",
+      "Bash(git config --global:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git rebase:*)",
+      "Bash(git commit --amend:*)"
     ]
   }
 }

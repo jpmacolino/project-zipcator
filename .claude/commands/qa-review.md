@@ -9,3 +9,5 @@ argument-hint: "[phase number or focus area]"
 3. Triage every finding: fix it with a regression test, or record in
    `docs/QA_REPORT.md` why it is deferred. Re-run the gates.
 4. Append a short phase entry to `docs/QA_REPORT.md` (findings, fixes, gate results).
+5. Commit each fix separately as you go, then commit the QA report update and
+   run `git tag phase-<N>`.

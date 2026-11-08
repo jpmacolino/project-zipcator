@@ -49,11 +49,29 @@ stop to ask the user for things that are irreversible or outside the repo
    screenshots* in `qa/screenshots/` before calling a UI phase done.
 8. **End of each phase:** run all gates, then run the independent review
    (`/qa-review` command, which uses the `qa-reviewer` subagent). Triage every
-   finding: fix it (with a test) or record why it's deferred. Then commit.
-9. **Git:** run `git init` in phase 0 if needed. Commit at least once per phase
-   with clear messages. Never commit `data/` contents (except
-   `data/README.md`), `qa/screenshots/`, `.env`, or files > 1 MB.
-   **Do not push or create the GitHub repo** — the user will do that.
+   finding: fix it (with a test) or record why it's deferred. Commit the
+   fixes, then tag the phase (`git tag phase-N`).
+9. **Git — commit early and often.** The user reviews the build through the
+   git history, so it must read as a clear story:
+   - Run `git init` in phase 0 if needed. Before the first commit, check
+     `git config user.name` and `git config user.email`; if either is empty,
+     **stop and ask the user** — never set git identity yourself.
+   - Commit after **every logical unit of work** once the gates pass for it:
+     e.g. "tests for geodesic circle" → "implement geodesic circle", one
+     module/feature/fix at a time. Small commits; never batch a whole phase
+     into one commit.
+   - Use Conventional Commit messages (`feat:`, `fix:`, `test:`, `docs:`,
+     `refactor:`, `chore:`, `build:`) with a short body explaining *why*.
+     Reference the SPEC section where relevant (e.g. "SPEC §5.3").
+   - Failing-test commits are allowed only for the test-first step, and must
+     say so in the subject (`test: add failing tests for overlap % (red)`).
+     Every other commit must pass `scripts/check.py`.
+   - QA-review fixes get their own commits (`fix: ... (QA phase 2 #3)`).
+   - Tag the end of each phase: `git tag phase-N` after its `/qa-review`.
+   - Never commit `data/` contents (except `data/README.md`),
+     `qa/screenshots/`, `.env`, or files > 1 MB. Never amend or rewrite
+     history that's already committed; never force anything.
+   - **Do not push, add remotes, or create the GitHub repo** — the user does that.
 10. Keep `app/streamlit_app.py` thin; all logic goes in `src/zipcator`.
 
 ## Conventions
