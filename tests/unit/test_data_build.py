@@ -18,7 +18,8 @@ import responses
 from shapely.geometry import Point, Polygon, box
 from zc_testkit import raw_data as rd
 
-from zipcator import data, data_build as db
+from zipcator import data
+from zipcator import data_build as db
 
 SRC = db.Sources(
     zcta_url="https://example.test/zcta.zip",
