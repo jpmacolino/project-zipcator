@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv sync:*)",
+      "Bash(uv run:*)",
+      "Bash(uv add:*)",
+      "Bash(uv lock:*)",
+      "Bash(uv python:*)",
+      "Bash(git init:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "WebFetch(domain:www2.census.gov)",
+      "WebFetch(domain:www.census.gov)",
+      "WebFetch(domain:geocoding.geo.census.gov)",
+      "WebFetch(domain:api.census.gov)",
+      "WebFetch(domain:download.geonames.org)",
+      "WebFetch(domain:nominatim.org)",
+      "WebFetch(domain:docs.streamlit.io)",
+      "WebFetch(domain:geopandas.org)",
+      "WebFetch(domain:pyproj4.github.io)"
+    ],
+    "ask": [
+      "Bash(git push:*)",
+      "Bash(gh repo create:*)"
+    ]
+  }
+}

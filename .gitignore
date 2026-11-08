@@ -1,0 +1,30 @@
+# Python / tooling
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Data (built locally by scripts/build_data.py — never committed)
+data/*
+!data/README.md
+
+# QA artifacts
+qa/screenshots/
+qa/probes/
+
+# Secrets / local
+.env
+.streamlit/secrets.toml
+.claude/settings.local.json
+.DS_Store
+Thumbs.db
