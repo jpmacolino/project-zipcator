@@ -25,10 +25,10 @@ from zc_testkit.synth import (
     multi,
     to_lonlat,
 )
-from zipcator.models import SearchResult
-from zipcator.search import find_zips
 
 from zipcator import geo
+from zipcator.models import SearchResult
+from zipcator.search import find_zips
 
 R10 = 10 * MILE_M  # 10-mile radius in metres
 
@@ -450,3 +450,53 @@ def test_to_lonlat_helper_roundtrip_sanity() -> None:
     minx, miny, maxx, _ = g.bounds
     width = Geodesic.WGS84.Inverse(miny, minx, miny, maxx)["s12"]
     assert width == pytest.approx(1000, rel=0.01)
+
+
+# ------------------------------------------------------------- input robustness (coverage)
+def test_non_wgs84_input_is_reprojected_not_misread() -> None:
+    gdf = make_gdf(
+        {"33601": box(-1000, -1000, 1000, 1000), "33602": box(8_000, -2000, 14_000, 2000)}
+    )
+    ref = find_zips(gdf, TAMPA, 10)
+    res = find_zips(gdf.to_crs(5070), TAMPA, 10)
+    assert list(res.matches["zip"]) == list(ref.matches["zip"])
+    assert res.matches["overlap_pct"].tolist() == pytest.approx(
+        ref.matches["overlap_pct"].tolist(), abs=0.01
+    )
+    assert res.matches.crs.to_epsg() == 4326
+
+
+def test_invalid_input_geometry_is_repaired_not_crashing() -> None:
+    """A self-intersecting 'bowtie' ZCTA would raise a GEOS error if used as-is."""
+    from shapely.geometry import Polygon
+
+    gdf = make_gdf({"33601": box(-1000, -1000, 1000, 1000)})
+    lat, lon = TAMPA
+    d = 0.01  # degrees; authored directly in lon/lat so no helper can "fix" it
+    bow = Polygon([(lon - d, lat - d), (lon + d, lat + d), (lon + d, lat - d), (lon - d, lat + d)])
+    assert not bow.is_valid
+    gdf = gdf.set_geometry(gpd.GeoSeries([bow], index=gdf.index, crs="EPSG:4326"))
+    res = find_zips(gdf, TAMPA, 10)
+    assert res.count == 1
+    assert 0 < res.matches.iloc[0].overlap_pct <= 100
+
+
+def test_to_dataframe_drops_geometry_and_keeps_zip_text() -> None:
+    res = find_zips(make_gdf({"02108": box(-1000, -1000, 1000, 1000)}), TAMPA, 10)
+    df = res.to_dataframe()
+    assert "geometry" not in df.columns
+    assert df["zip"].tolist() == ["02108"]
+
+
+def test_zip_matches_converts_missing_optional_fields_to_none() -> None:
+    gdf = make_gdf({"33601": box(-1000, -1000, 1000, 1000)}).drop(columns=["city", "county"])
+    (m,) = find_zips(gdf, TAMPA, 10).zip_matches()
+    assert m.city is None and m.county is None and m.population is None
+    assert m.est_population_in_radius is None
+
+
+def test_zip_matches_carries_population() -> None:
+    gdf = make_gdf({"33601": box(-1000, -1000, 1000, 1000)}, population={"33601": 500})
+    (m,) = find_zips(gdf, TAMPA, 10).zip_matches()
+    assert m.population == 500
+    assert m.est_population_in_radius == pytest.approx(500.0, abs=0.1)
