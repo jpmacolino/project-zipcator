@@ -42,9 +42,29 @@ def _validate(gdf: gpd.GeoDataFrame, min_overlap_pct: float) -> gpd.GeoDataFrame
         raise ValueError(f"ZCTA data is missing required column(s): {', '.join(missing)}")
     if not (math.isfinite(min_overlap_pct) and 0 <= min_overlap_pct <= 100):
         raise ValueError(f"min_overlap_pct must be between 0 and 100 (got {min_overlap_pct})")
-    if gdf.crs is not None and gdf.crs.to_epsg() != 4326:
+    if gdf.crs is None:  # documented assumption: unlabeled input is lon/lat WGS84
+        gdf = gdf.set_crs(4326)
+    elif gdf.crs.to_epsg() != 4326:
         gdf = gdf.to_crs(4326)
     return gdf
+
+
+def _validate_zips(cand: gpd.GeoDataFrame) -> None:
+    """ZIPs must be unique 5-digit *strings* (CLAUDE.md: never ints; leading zeros).
+
+    Checked on the candidates only, so the cost does not scale with all ~33k ZCTAs.
+    """
+    zips = cand["zip"]
+    if len(zips) and not pd.api.types.is_string_dtype(zips):
+        raise ValueError(f"'zip' column must hold 5-digit strings, not {zips.dtype}")
+    bad = zips[~zips.astype(str).str.fullmatch(r"\d{5}")]
+    if len(bad):
+        raise ValueError(
+            f"invalid zip value(s) (need 5 digits): {sorted(set(bad.astype(str)))[:5]}"
+        )
+    if zips.duplicated().any():
+        dupes = sorted(set(zips[zips.duplicated()]))[:5]
+        raise ValueError(f"duplicate zip value(s) in ZCTA data: {dupes}")
 
 
 def _sorted(frame: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -76,6 +96,8 @@ def find_zips(
     # 2. Candidate prefilter: spatial index on the circle's bounding box.
     hits = np.sort(zctas.sindex.query(box(*circle.bounds)))
     cand = zctas.iloc[hits]
+    logger.debug("prefilter: %d of %d ZCTAs are candidates", len(cand), len(zctas))
+    _validate_zips(cand)
 
     # 3. Project candidates and circle to LAEA centred on the search point.
     laea = geo.laea_crs(lat, lon)
