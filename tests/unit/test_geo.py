@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import math
 
+import geopandas as gpd
 import pytest
 from geographiclib.geodesic import Geodesic
 from pyproj import Transformer
 from shapely.geometry import Point, Polygon
-from shapely.ops import transform
 
 from zipcator import geo
 
@@ -16,12 +16,9 @@ MILE_M = 1609.344
 
 
 def _laea_area_m2(circle: Polygon, lat: float, lon: float) -> float:
-    t = Transformer.from_crs(
-        "EPSG:4326",
-        f"+proj=laea +lat_0={lat} +lon_0={lon} +datum=WGS84 +units=m +no_defs",
-        always_xy=True,
-    )
-    return float(transform(t.transform, circle).area)
+    # Independent proj string (not geo.laea_crs) so the test does not trust the code under test.
+    crs = f"+proj=laea +lat_0={lat} +lon_0={lon} +datum=WGS84 +units=m +no_defs"
+    return float(gpd.GeoSeries([circle], crs="EPSG:4326").to_crs(crs).area.iloc[0])
 
 
 @pytest.mark.parametrize("lat", [0.0, 28.0, 45.0, 64.0])
@@ -158,10 +155,12 @@ def test_laea_crs_is_equal_area_centered_on_point() -> None:
     t = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
     x, y = t.transform(-82.0, 28.0)
     assert (x, y) == pytest.approx((0.0, 0.0), abs=1e-6)
-    p4 = crs.to_proj4()
-    assert "laea" in p4
-    assert "+lat_0=28" in p4
-    assert "+lon_0=-82" in p4
+    wkt = crs.to_wkt()
+    assert "Lambert Azimuthal Equal Area" in wkt
+    assert crs.coordinate_operation is not None
+    params = {p.name: p.value for p in crs.coordinate_operation.params}
+    assert params["Latitude of natural origin"] == pytest.approx(28.0)
+    assert params["Longitude of natural origin"] == pytest.approx(-82.0)
 
 
 def test_aeqd_preserves_distance_from_center() -> None:
