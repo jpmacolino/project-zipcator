@@ -107,6 +107,12 @@ class SearchResult:
         est = self.matches["est_population_in_radius"].dropna()
         return None if est.empty else float(est.sum())
 
+    @property
+    def population_complete(self) -> bool:
+        """True only if *every* match has population data, i.e. the total is not understated."""
+        est = self.matches["est_population_in_radius"]
+        return bool(len(est) and est.notna().all())
+
     def to_dataframe(self) -> pd.DataFrame:
         """``matches`` without geometry (table / CSV export)."""
         return pd.DataFrame(self.matches.drop(columns="geometry"))

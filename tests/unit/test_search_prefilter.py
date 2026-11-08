@@ -5,8 +5,8 @@ from __future__ import annotations
 import logging
 
 import pytest
-from zc_testkit.synth import CENTERS, MILE_M, TAMPA, make_gdf
 from shapely.geometry import box
+from zc_testkit.synth import CENTERS, MILE_M, TAMPA, make_gdf
 
 from zipcator.search import find_zips
 
