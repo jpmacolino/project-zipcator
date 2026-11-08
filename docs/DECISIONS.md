@@ -42,8 +42,10 @@ Format: date — decision — why — alternatives considered.
 - **2026-11-08 — `zip_area_sq_mi` is the *projected polygon area* (LAEA), not `land_area_sq_mi`.**
   Why: overlap % must be area-in-radius / the same polygon's area, so it stays in [0, 100].
 - **2026-11-08 — `nearest_distance_mi` measured in an azimuthal-equidistant CRS** centred on the
-  point: radial distances there are true geodesic distances, so planar distance center→polygon
-  is the exact geodesic nearest distance (LAEA is only used for area).
+  point: radial distances there are true geodesic distances from the center, so planar
+  distance center→polygon is the geodesic nearest distance for the polygon *as stored*
+  (ZIP edges are straight in lon/lat, so this is exact to ~1e-4 relative at 100 mi; QA
+  phase 1 corrected an earlier "exact" claim). LAEA is only used for area.
 - **2026-11-08 — Min-overlap filter is `>=` with a 1e-9 pp tolerance**; the home ZIP(s) are always
   kept. If the center sits exactly on a shared boundary, both ZIPs are flagged
   `contains_center`.
