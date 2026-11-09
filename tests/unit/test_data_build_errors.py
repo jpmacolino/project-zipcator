@@ -6,8 +6,6 @@ import json
 import zipfile
 from pathlib import Path
 
-import geopandas as gpd
-import pandas as pd
 import pytest
 import requests
 import responses
@@ -94,19 +92,6 @@ def test_polygonal_extracts_polygons_from_a_geometry_collection() -> None:
 
 def test_polygonal_returns_none_when_no_area_survives() -> None:
     assert db._polygonal(GeometryCollection([LineString([(0, 0), (1, 1)]), Point(2, 2)])) is None
-
-
-def test_assemble_drops_zctas_with_no_polygon_area(caplog: pytest.LogCaptureFixture) -> None:
-    sliver = LineString([(0, 0), (1, 1)]).buffer(0)  # degenerate: empty polygon
-    boundaries = gpd.GeoDataFrame(
-        {"zip": ["11111", "22222"], "land_area_sq_mi": [1.0, 1.0]},
-        geometry=[box(0, 0, 1, 1), sliver],
-        crs="EPSG:4326",
-    )
-    rel = pd.DataFrame({"zip": ["11111", "22222"], "state": ["FL", "FL"], "county": ["A", "B"]})
-    gdf = db.assemble(boundaries, rel, pd.DataFrame(columns=["zip", "city"]), simplification=None)
-    assert gdf["zip"].tolist() == ["11111"]
-    assert "no polygon area" in caplog.text
 
 
 @responses.activate

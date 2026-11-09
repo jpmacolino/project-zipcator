@@ -10,14 +10,13 @@ import json
 import logging
 import zipfile
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import geopandas as gpd
-import numpy as np
 import pandas as pd
 import pyogrio
 import requests
@@ -29,41 +28,17 @@ from zipcator import __version__, config, data
 
 logger = logging.getLogger(__name__)
 
-BUILD_VERSION = "2"
+BUILD_VERSION = "3"
 DEFAULT_ACS_YEAR = 2023
 SQ_M_PER_SQ_MI = 2_589_988.110336
 
 
-@dataclass(frozen=True)
-class Simplification:
-    """Size-adaptive Douglas-Peucker simplification (topology-preserving).
-
-    A polygon's tolerance is ``rel`` x its characteristic size (√area, corrected for
-    latitude), clipped to ``[min_deg, max_deg]`` degrees. Overlap-% error from simplifying is
-    roughly (tolerance / polygon size), so a fixed tolerance wrecks small urban ZIPs while
-    barely thinning the huge rural ZIPs that hold most vertices. Chosen empirically; see the
-    simplification study in docs/DECISIONS.md.
-    """
-
-    rel: float = 0.01
-    min_deg: float = 0.0001
-    max_deg: float = 0.003
-
-    @classmethod
-    def uniform(cls, tolerance_deg: float) -> Simplification:
-        """A constant tolerance for every polygon (used by the study and in tests)."""
-        return cls(rel=0.0, min_deg=tolerance_deg, max_deg=tolerance_deg)
-
-    def tolerances(self, geoms: np.ndarray) -> np.ndarray:
-        """Per-geometry tolerance in degrees for an array of lon/lat geometries."""
-        miny = shapely.bounds(geoms)[:, 1]
-        maxy = shapely.bounds(geoms)[:, 3]
-        coslat = np.cos(np.radians((miny + maxy) / 2.0))
-        size_deg = np.sqrt(shapely.area(geoms) * coslat)
-        return np.asarray(np.clip(self.rel * size_deg, self.min_deg, self.max_deg), dtype=float)
-
-
-DEFAULT_SIMPLIFICATION = Simplification()
+#: Douglas-Peucker tolerance in degrees (~55 m at the equator), applied with *coverage*
+#: simplification so neighbouring ZIPs keep a shared boundary (no gaps or overlaps). Chosen by
+#: the study in docs/DECISIONS.md: ~40 MB artifact, worst overlap-% drift 0.13 pp.
+DEFAULT_TOLERANCE = 0.0005
+#: zstd shrinks the coordinate-heavy artifact ~45 % vs the snappy default.
+PARQUET_OPTIONS: Mapping[str, Any] = {"compression": "zstd", "compression_level": 19}
 _CHUNK = 1 << 20
 _TIMEOUT = (15, 300)
 
@@ -346,15 +321,29 @@ def _with_text_zip(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def simplify_coverage(geoms: gpd.GeoSeries, tolerance: float) -> gpd.GeoSeries:
+    """Topology-preserving *coverage* simplification (``shapely.coverage_simplify``).
+
+    Every edge shared by two neighbouring polygons is simplified once and identically for both,
+    so a clean partition (the Census ZCTA file has 0 km² of overlap) stays a clean partition:
+    no new gaps or overlaps. Per-polygon ``simplify`` cannot guarantee that. Null/empty entries
+    pass through unchanged.
+    """
+    arr = geoms.to_numpy().copy()
+    usable = ~(shapely.is_missing(arr) | shapely.is_empty(arr))
+    arr[usable] = shapely.coverage_simplify(arr[usable], tolerance)
+    return gpd.GeoSeries(arr, index=geoms.index, crs=geoms.crs)
+
+
 def assemble(
     boundaries: gpd.GeoDataFrame,
     rel: pd.DataFrame,
     geonames: pd.DataFrame,
     population: pd.DataFrame | None = None,
     *,
-    simplification: Simplification | None = DEFAULT_SIMPLIFICATION,
+    tolerance: float = DEFAULT_TOLERANCE,
 ) -> gpd.GeoDataFrame:
-    """Join the sources, simplify, repair geometry and add representative points."""
+    """Join the sources, repair geometry, simplify (``tolerance`` degrees; 0 = off), add points."""
     gdf = boundaries.merge(_with_text_zip(rel), on="zip", how="left")
     gdf = gdf.merge(_with_text_zip(geonames[["zip", "city"]]), on="zip", how="left")
     if population is not None:
@@ -363,36 +352,21 @@ def assemble(
         gdf["population"] = pd.NA
     gdf["population"] = gdf["population"].astype("Int64")
 
-    no_state = gdf["state"].isna()
-    if no_state.any():
-        logger.warning(
-            "dropping %d ZCTA(s) without a state/county match, e.g. %s",
-            int(no_state.sum()),
-            list(gdf.loc[no_state, "zip"][:10]),
-        )
-        gdf = gdf[~no_state]
-
+    # Rows are never dropped here: a ZCTA that lacks a state or a polygon is reported by the
+    # SPEC §4.3 validation, which fails the build loudly instead of silently losing ZIPs.
     geoms = gdf.geometry
-    if simplification is not None:
-        tol = simplification.tolerances(geoms.to_numpy())
-        geoms = gpd.GeoSeries(
-            shapely.simplify(geoms.to_numpy(), tol, preserve_topology=True),
-            index=geoms.index,
-            crs=geoms.crs,
-        )
-    invalid = ~geoms.is_valid
+    invalid = ~geoms.is_valid & ~geoms.is_empty & ~geoms.isna()
     if invalid.any():
         logger.info("repairing %d invalid geometries", int(invalid.sum()))
         geoms = geoms.copy()
         geoms[invalid] = shapely.make_valid(geoms[invalid].to_numpy())
     geoms = gpd.GeoSeries([_polygonal(g) for g in geoms], index=geoms.index, crs=geoms.crs)
-    keep = ~(geoms.isna() | geoms.is_empty)
-    if not keep.all():
-        logger.warning("dropping %d ZCTA(s) with no polygon area", int((~keep).sum()))
-    gdf = gdf.assign(geometry=geoms)[keep]
-    gdf = gdf.set_geometry("geometry")
+    if tolerance > 0:
+        geoms = simplify_coverage(geoms, tolerance)
+    gdf = gdf.assign(geometry=geoms).set_geometry("geometry")
 
-    rep = gdf.geometry.representative_point()
+    usable = gdf.geometry.notna() & ~gdf.geometry.is_empty
+    rep = gdf.geometry.where(usable).representative_point()
     gdf["intpt_lon"] = rep.x
     gdf["intpt_lat"] = rep.y
     cols = ["zip", "state", "county", "city", "land_area_sq_mi", "intpt_lat", "intpt_lon",
@@ -416,7 +390,7 @@ def build(
     refresh: bool = False,
     with_population: bool = False,
     census_api_key: str | None = None,
-    simplification: Simplification | None = DEFAULT_SIMPLIFICATION,
+    tolerance: float = DEFAULT_TOLERANCE,
     sources: Sources = DEFAULT_SOURCES,
     session: requests.Session | None = None,
     min_rows: int = data.MIN_ROWS,
@@ -460,8 +434,14 @@ def build(
         )
         pop_downloaded = _now()
 
-    logger.info("assembling (simplification: %s)", simplification)
-    gdf = assemble(boundaries, rel, geonames, population, simplification=simplification)
+    logger.info("assembling (coverage simplification tolerance %g degrees)", tolerance)
+    gdf = assemble(boundaries, rel, geonames, population, tolerance=tolerance)
+    blank_cities = float(gdf["city"].isna().mean())
+    if blank_cities > 0.1:
+        logger.warning(
+            "%.0f%% of ZIPs have no city name; is the GeoNames file empty or in a new format?",
+            blank_cities * 100,
+        )
 
     logger.info("validating %s rows", f"{len(gdf):,}")
     problems = data.validate_zcta_frame(gdf, min_rows=min_rows, check_geometry_validity=True)
@@ -492,11 +472,16 @@ def build(
         "zipcator_version": __version__,
         "build_script_version": BUILD_VERSION,
         "row_count": len(gdf),
+        "input_zcta_count": len(boundaries),
         "simplification": (
             None
-            if simplification is None
-            else {"method": "douglas-peucker, topology-preserving", **asdict(simplification)}
+            if tolerance <= 0
+            else {
+                "method": "shapely.coverage_simplify (shared edges simplified once)",
+                "tolerance_deg": tolerance,
+            }
         ),
+        "parquet_options": dict(PARQUET_OPTIONS),
         "population_included": population is not None,
         "land_area_source": "Census ALAND20 (square meters) converted to square miles",
         "sources": source_records,
@@ -510,7 +495,7 @@ def build(
         },
     }
     out = data_dir / "zcta.parquet"
-    _write_atomic(out, lambda p: gdf.to_parquet(p))
+    _write_atomic(out, lambda p: gdf.to_parquet(p, **PARQUET_OPTIONS))
     _write_atomic(
         data_dir / "metadata.json",
         lambda p: p.write_text(json.dumps(metadata, indent=2), encoding="utf-8"),

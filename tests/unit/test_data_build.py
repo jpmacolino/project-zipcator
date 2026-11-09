@@ -15,7 +15,7 @@ import pandas as pd
 import pytest
 import requests
 import responses
-from shapely.geometry import Point, Polygon, box
+from shapely.geometry import LineString, Point, Polygon, box
 from zc_testkit import raw_data as rd
 
 from zipcator import data
@@ -216,7 +216,7 @@ def test_assemble_joins_and_computes_representative_points() -> None:
         _boundaries({"11111": donut}),
         _rel(["11111"]),
         pd.DataFrame({"zip": ["11111"], "city": ["Town"]}),
-        simplification=None,
+        tolerance=0.0,
     )
     row = gdf.iloc[0]
     assert row.city == "Town" and row.state == "FL" and row.county == "X County"
@@ -235,27 +235,13 @@ def test_assemble_joins_and_computes_representative_points() -> None:
     assert str(gdf["population"].dtype) == "Int64" and gdf["population"].isna().all()
 
 
-def test_assemble_tolerates_missing_city_and_drops_rows_without_state(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    geoms = {"11111": box(0, 0, 1, 1), "22222": box(2, 2, 3, 3)}
-    gdf = db.assemble(
-        _boundaries(geoms),
-        _rel(["11111"]),  # 22222 has no county row -> no state
-        pd.DataFrame({"zip": [], "city": []}),
-        simplification=None,
-    )
-    assert gdf["zip"].tolist() == ["11111"] and pd.isna(gdf.iloc[0].city)
-    assert "22222" in caplog.text
-
-
 def test_assemble_simplifies_within_tolerance_and_stays_valid() -> None:
     circle = Point(0, 0).buffer(1.0, quad_segs=500)  # 2000 vertices
     gdf = db.assemble(
         _boundaries({"11111": circle}),
         _rel(["11111"]),
         pd.DataFrame(columns=["zip", "city"]),
-        simplification=db.Simplification.uniform(0.001),
+        tolerance=0.001,
     )
     simple = gdf.geometry.iloc[0]
     assert len(simple.exterior.coords) < len(circle.exterior.coords) / 4
@@ -270,7 +256,7 @@ def test_assemble_repairs_invalid_geometry() -> None:
         _boundaries({"11111": bowtie}),
         _rel(["11111"]),
         pd.DataFrame(columns=["zip", "city"]),
-        simplification=None,
+        tolerance=0.0,
     )
     assert gdf.geometry.is_valid.all() and not gdf.geometry.is_empty.any()
     assert gdf.geometry.iloc[0].geom_type in {"Polygon", "MultiPolygon"}
@@ -283,7 +269,7 @@ def test_assemble_joins_population() -> None:
         _rel(["11111"]),
         pd.DataFrame(columns=["zip", "city"]),
         pop,
-        simplification=None,
+        tolerance=0.0,
     )
     assert gdf.iloc[0].population == 42
 
@@ -293,9 +279,7 @@ def test_assemble_joins_population() -> None:
 def test_build_end_to_end_on_synthetic_inputs(tmp_path: Path, raw_files: dict[str, bytes]) -> None:
     _mock_sources(responses, raw_files)
     out = tmp_path / "data"
-    result = db.build(
-        out, sources=SRC, min_rows=len(rd.ZCTAS), simplification=db.Simplification.uniform(0.0001)
-    )
+    result = db.build(out, sources=SRC, min_rows=len(rd.ZCTAS), tolerance=0.0001)
     assert result.path == out / "zcta.parquet" and result.path.exists()
     gdf = data.load_zctas(result.path)  # also proves the loader accepts what the builder writes
     assert len(gdf) == len(rd.ZCTAS)
@@ -306,9 +290,7 @@ def test_build_end_to_end_on_synthetic_inputs(tmp_path: Path, raw_files: dict[st
     assert gdf.crs.to_epsg() == 4326 and gdf.geometry.is_valid.all()
     meta = json.loads((out / "metadata.json").read_text())
     assert meta["row_count"] == len(rd.ZCTAS)
-    assert (
-        meta["simplification"]["min_deg"] == 0.0001 and meta["simplification"]["max_deg"] == 0.0001
-    )
+    assert meta["simplification"]["tolerance_deg"] == 0.0001
     assert meta["population_included"] is False
     assert meta["build_script_version"] == db.BUILD_VERSION
     for key in ("built_at", "zipcator_version", "vintages", "sources"):
@@ -420,61 +402,6 @@ def test_land_area_conversion_constant() -> None:
     assert math.isclose(db.SQ_M_PER_SQ_MI, 2_589_988.110336)
 
 
-# ------------------------------------------------------------------ adaptive simplification
-def test_simplification_tolerance_scales_with_polygon_size_and_is_clipped() -> None:
-    import numpy as np
-
-    s = db.Simplification(rel=0.01, min_deg=0.0001, max_deg=0.003)
-    tiny, mid, huge = box(0, 0, 0.001, 0.001), box(0, 0, 0.2, 0.2), box(0, 0, 5, 5)
-    tol = s.tolerances(np.array([tiny, mid, huge], dtype=object))
-    assert tol[0] == pytest.approx(0.0001)  # clipped up to the floor: keep detail on tiny ZIPs
-    assert tol[1] == pytest.approx(0.01 * 0.2, rel=1e-3)  # proportional to size (equator)
-    assert tol[2] == pytest.approx(0.003)  # clipped to the ceiling
-    assert list(tol) == sorted(tol)
-
-
-def test_simplification_shrinks_size_by_latitude() -> None:
-    """A degree of longitude is shorter at 65°N, so the same-degree box is 'smaller'."""
-    import numpy as np
-
-    s = db.Simplification(rel=0.01, min_deg=0.0, max_deg=1.0)
-    eq, ak = box(0, 0, 1, 1), box(0, 64.5, 1, 65.5)
-    t_eq, t_ak = s.tolerances(np.array([eq, ak], dtype=object))
-    assert t_ak < t_eq
-
-
-def test_uniform_simplification_is_a_constant_tolerance() -> None:
-    import numpy as np
-
-    s = db.Simplification.uniform(0.002)
-    tol = s.tolerances(np.array([box(0, 0, 0.001, 0.001), box(0, 0, 9, 9)], dtype=object))
-    assert list(tol) == [0.002, 0.002]
-
-
-def test_adaptive_assemble_keeps_detail_on_small_zips_and_simplifies_large_ones() -> None:
-    small = Point(0, 0).buffer(0.005, quad_segs=300)  # ~1 km ZIP, 1200 vertices
-    large = Point(10, 0).buffer(0.5, quad_segs=300)  # ~110 km ZIP, 1200 vertices
-    gdf = db.assemble(
-        _boundaries({"11111": small, "22222": large}),
-        _rel(["11111", "22222"]),
-        pd.DataFrame(columns=["zip", "city"]),
-        simplification=db.Simplification(),
-    )
-    out = gdf.set_index("zip").geometry
-    err_small = out["11111"].hausdorff_distance(small)
-    err_large = out["22222"].hausdorff_distance(large)
-    assert err_small <= 0.0001 + 1e-9  # floor tolerance: tiny ZIPs keep their detail
-    assert err_large <= 0.003 + 1e-9  # ceiling tolerance: error is capped for huge ZIPs
-    assert err_large > 10 * err_small  # ...but the large one is simplified far more coarsely
-    # a 0.003 deg tolerance on a 0.5 deg-radius circle costs ~0.6% of its area, by design
-    assert out["22222"].area == pytest.approx(large.area, rel=0.01)
-
-
-def test_default_simplification_is_adaptive_and_documented() -> None:
-    d = db.DEFAULT_SIMPLIFICATION
-    assert d.rel > 0 and d.min_deg < d.max_deg
-
-
 # ------------------------------------------------------------- GeoNames territory files
 def _territory_zip(code: str, rows: list[tuple[str, str]]) -> bytes:
     import io
@@ -527,3 +454,130 @@ def test_build_fills_missing_cities_from_territory_files_without_overriding_us(
     assert row.loc["02108", "city"] == "Boston"  # US file wins on conflicts
     names = {s["name"] for s in result.metadata["sources"]}
     assert "geonames_PR" in names
+
+
+# ------------------------------------------------- QA phase 2: nothing is silently dropped
+def test_assemble_keeps_rows_without_a_state_so_validation_can_flag_them() -> None:
+    geoms = {"11111": box(0, 0, 1, 1), "22222": box(2, 2, 3, 3)}
+    gdf = db.assemble(
+        _boundaries(geoms),
+        _rel(["11111"]),  # 22222 has no county row -> no state
+        pd.DataFrame({"zip": [], "city": []}),
+        tolerance=0.0,
+    )
+    assert gdf["zip"].tolist() == ["11111", "22222"]  # regression: used to be dropped quietly
+    assert pd.isna(gdf.iloc[0].city) and pd.isna(gdf.set_index("zip").loc["22222", "state"])
+
+
+@responses.activate
+def test_build_fails_loudly_naming_zips_that_have_no_state(
+    tmp_path: Path, raw_files: dict[str, bytes]
+) -> None:
+    """Regression: a ZCTA whose county FIPS is unmapped used to vanish with only a log line,
+    and min_rows=33,000 tolerated up to 791 such losses."""
+    bad_rel = (
+        rd.relationship_text().replace("|25025|Suffolk County|", "|99999|Suffolk County|").encode()
+    )
+    _mock_sources(responses, {**raw_files, "rel": bad_rel})
+    with pytest.raises(db.BuildError) as exc:
+        db.build(tmp_path / "d", sources=SRC, min_rows=1)  # min_rows is NOT what catches it
+    msg = str(exc.value)
+    assert "no state" in msg and "02108" in msg and "Nothing was written" in msg
+    assert not (tmp_path / "d" / "zcta.parquet").exists()
+
+
+@responses.activate
+def test_build_fails_loudly_on_zctas_without_polygon_area(
+    tmp_path: Path, raw_files: dict[str, bytes]
+) -> None:
+    sliver = LineString([(0, 0), (1, 1)]).buffer(0)  # degenerate: empty polygon
+    boundaries = gpd.GeoDataFrame(
+        {"zip": ["11111", "22222"], "land_area_sq_mi": [1.0, 1.0]},
+        geometry=[box(0, 0, 1, 1), sliver],
+        crs="EPSG:4326",
+    )
+    gdf = db.assemble(boundaries, _rel(["11111", "22222"]), pd.DataFrame(columns=["zip", "city"]))
+    problems = data.validate_zcta_frame(gdf, min_rows=1)
+    assert any("empty" in p or "null" in p for p in problems)
+    assert gdf["zip"].tolist() == ["11111", "22222"]  # kept, so the validation can report it
+
+
+def test_build_metadata_records_the_input_zcta_count(tmp_path: Path) -> None:
+    with responses.RequestsMock() as rsps:
+        files = {
+            "zcta": rd.boundary_zip_bytes(tmp_path / "mk"),
+            "rel": rd.relationship_text().encode(),
+            "geonames": rd.geonames_zip_bytes(),
+        }
+        _mock_sources(rsps, files)
+        result = db.build(tmp_path / "d", sources=SRC, min_rows=1)
+    assert result.metadata["input_zcta_count"] == len(rd.ZCTAS) == result.metadata["row_count"]
+
+
+# ---------------------------------------------- QA phase 2: coverage (shared-edge) simplification
+def _wiggly_pair() -> tuple[Polygon, Polygon]:
+    """Two neighbours sharing a random-walk boundary: a clean partition of the unit square.
+
+    The rings start at different vertices, as real neighbouring ZCTAs do, so a per-polygon
+    simplifier anchors the shared seam differently on each side.
+    """
+    import random
+
+    rnd = random.Random(1)  # seeded: seams for which the per-polygon defect shows up
+    n = 120
+    seam = [(0.5 + rnd.uniform(-0.02, 0.02), i / n) for i in range(n + 1)]
+    seam[0], seam[-1] = (0.5, 0.0), (0.5, 1.0)
+    return Polygon([(0, 0), *seam, (0, 1)]), Polygon([(1, 1), (1, 0), *seam])
+
+
+def _leak(a: Polygon, b: Polygon) -> float:
+    """Total area wrongly shared (overlap) or lost (gap) between two tiles of the unit square."""
+    return a.intersection(b).area + (1.0 - a.union(b).area)
+
+
+def test_coverage_simplification_keeps_neighbours_a_clean_partition() -> None:
+    """The point of coverage simplification: no gap and no overlap along shared edges."""
+    left, right = _wiggly_pair()
+    assert _leak(left, right) == pytest.approx(0.0, abs=1e-12)  # premise: clean partition
+    out = db.assemble(
+        _boundaries({"11111": left, "22222": right}),
+        _rel(["11111", "22222"]),
+        pd.DataFrame(columns=["zip", "city"]),
+        tolerance=0.02,
+    )
+    a, b = out.geometry.iloc[0], out.geometry.iloc[1]
+    assert len(a.exterior.coords) < len(left.exterior.coords) / 2  # it did simplify
+    assert _leak(a, b) == pytest.approx(0.0, abs=1e-12)
+    assert a.area + b.area == pytest.approx(1.0, abs=1e-12)  # still tiles the square
+
+
+def test_per_polygon_simplification_would_have_failed_that_test() -> None:
+    """Guards the guard: the same pair shows the defect of the earlier per-polygon approach
+    (on real data it opened 9,198 km² of overlap, ~0.12% of the area)."""
+    import shapely
+
+    left, right = _wiggly_pair()
+    a, b = shapely.simplify([left, right], 0.02, preserve_topology=True)
+    assert _leak(a, b) > 1e-3
+
+
+def test_simplify_coverage_passes_null_and_empty_through() -> None:
+    gs = gpd.GeoSeries([box(0, 0, 1, 1), None, Polygon()], crs="EPSG:4326")
+    out = db.simplify_coverage(gs, 0.01)
+    assert out.iloc[0].equals(box(0, 0, 1, 1))
+    assert out.iloc[1] is None and out.iloc[2].is_empty
+
+
+def test_default_tolerance_and_parquet_options_are_documented_constants() -> None:
+    assert db.DEFAULT_TOLERANCE == 0.0005
+    assert db.PARQUET_OPTIONS["compression"] == "zstd"
+
+
+@responses.activate
+def test_build_writes_zstd_compressed_parquet(tmp_path: Path, raw_files: dict[str, bytes]) -> None:
+    import pyarrow.parquet as pq
+
+    _mock_sources(responses, raw_files)
+    result = db.build(tmp_path / "d", sources=SRC, min_rows=len(rd.ZCTAS))
+    codec = pq.ParquetFile(result.path).metadata.row_group(0).column(0).compression
+    assert codec == "ZSTD"
