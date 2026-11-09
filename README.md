@@ -16,18 +16,32 @@ Many tools list the ZIPs whose *center point* is inside the radius. In rural are
 badly: the ZIP your address is in can be so large that its center is 20 miles away. Zipcator
 intersects the real ZIP polygons with a true geodesic circle, so the ZIP containing the address is
 never missed and large ZIPs at the edge of the circle are found. Near Okeechobee, FL, a 10-mile
-search finds two ZIPs (34972: 17 % inside the circle, 34974: 28 %); a centroid-only search finds
-**none**. A *minimum overlap* filter then trims ZIPs that only barely touch the circle.
+search finds two ZIPs (34972, the one the address is in: 17 % inside the circle; and 34974: 28 %).
+A search that tests one center point per ZIP never finds 34972 at 10 miles or below: using the
+ZIP's representative point (a point guaranteed to be inside it) it finds nothing at all, and using
+the true polygon centroid it finds only 34974, and only from 10 miles. A *minimum overlap* filter
+then trims ZIPs that only barely touch the circle. (Measured on the real data; see
+[docs/QA_REPORT.md](docs/QA_REPORT.md).)
 
 ## Quick start
 
-You need [`uv`](https://docs.astral.sh/uv/) (it installs the right Python for you) and an
-internet connection for the one-time setup. Works on Windows, macOS and Linux.
+You need [`git`](https://git-scm.com/), [`uv`](https://docs.astral.sh/uv/) (it installs the right
+Python for you) and an internet connection for the one-time setup. Works on Windows, macOS and
+Linux. Install `uv` once, then **open a new terminal** so it is on your `PATH`:
 
 ```powershell
-# Windows PowerShell: install uv once (macOS/Linux: curl -LsSf https://astral.sh/uv/install.sh | sh)
+# Windows PowerShell
 powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
 
+```bash
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Then, in any shell (these commands are the same everywhere):
+
+```
 git clone https://github.com/jpmacolino/project-zipcator.git
 cd project-zipcator
 
@@ -84,8 +98,10 @@ geocoder unavailable / write error, `2` invalid arguments, `3` ZIP data missing 
   state that differs from their postal address (e.g. 82930 Evanston is labelled UT; USPS says WY).
 * **Polygons are the 1:500,000 shoreline-clipped boundary file**, simplified (tolerance 0.0005°,
   shared edges simplified once so neighbours never overlap). Measured against the unsimplified
-  shapes, overlap % moves by at most 0.2 percentage points on every checked scenario.
-* **"Area in radius" is polygon area**, not land area: inland water inside a ZCTA counts.
+  shapes, overlap % moved by at most 0.20 percentage points (worst case: a 100-mile search around
+  Orlando) across the nine verification scenarios in [docs/QA_REPORT.md](docs/QA_REPORT.md).
+* **"Area in radius" is polygon area**, not land area: inland water, bays and lagoons inside a ZCTA
+  count (open ocean does not, because the polygons are clipped to the shoreline).
 * **Population** (optional, see below) is a *rough estimate* that assumes people are spread evenly
   across each ZIP.
 * **United States only.** Coordinates and addresses outside the US are refused. The check is a
@@ -96,7 +112,14 @@ geocoder unavailable / write error, `2` invalid arguments, `3` ZIP data missing 
 ## Optional: population
 
 ```powershell
-$env:CENSUS_API_KEY = "your-free-key"      # https://api.census.gov/data/key_signup.html
+# Windows PowerShell (free key: https://api.census.gov/data/key_signup.html)
+$env:CENSUS_API_KEY = "your-free-key"
+uv run python scripts/build_data.py --with-population
+```
+
+```bash
+# macOS / Linux
+export CENSUS_API_KEY="your-free-key"
 uv run python scripts/build_data.py --with-population
 ```
 
