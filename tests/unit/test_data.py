@@ -140,8 +140,74 @@ def test_null_and_empty_geometry_reported() -> None:
 
 
 def test_invalid_geometry_reported_only_when_checked() -> None:
-    bowtie = Polygon([(0, 0), (1, 1), (1, 0), (0, 1)])
+    # self-intersecting, but its left lobe still covers the row's representative point
+    bowtie = Polygon([(-71.08, 42.33), (-71.03, 42.38), (-71.03, 42.33), (-71.08, 42.38)])
     frame = _frame()
     frame.loc[0, "geometry"] = bowtie
     assert _problems(frame, min_rows=1, check_geometry_validity=False) == []
     assert any("invalid" in p for p in _problems(frame, min_rows=1, check_geometry_validity=True))
+
+
+# ----------------------------------------- QA phase 2: loader validates what find_zips assumes
+def test_nan_representative_point_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "zcta.parquet"
+    _frame(intpt_lat=[float("nan"), 27.95]).to_parquet(path)
+    with pytest.raises(data.DataFormatError, match="intpt"):
+        data.load_zctas(path)
+
+
+def test_swapped_lat_lon_representative_points_are_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "zcta.parquet"
+    _frame(intpt_lat=[-71.06, -82.46], intpt_lon=[42.35, 27.95]).to_parquet(path)
+    with pytest.raises(data.DataFormatError, match="intpt"):
+        data.load_zctas(path)
+
+
+def test_representative_point_outside_its_polygon_is_reported() -> None:
+    problems = _problems(_frame(intpt_lat=[42.50, 27.95]), min_rows=1)
+    assert any("intpt" in p and "inside" in p for p in problems)
+
+
+def test_null_geometry_does_not_also_trigger_a_misleading_intpt_problem() -> None:
+    frame = _frame()
+    frame.loc[0, "geometry"] = None
+    problems = _problems(frame, min_rows=1)
+    assert any("null" in p for p in problems)
+    assert not any("intpt" in p for p in problems)
+
+
+@pytest.mark.parametrize("bad", ["XX", "ZZ", "fl"])
+def test_unknown_state_codes_are_reported(bad: str) -> None:
+    assert any("state" in p for p in _problems(_frame(state=[bad, "FL"]), min_rows=1))
+
+
+def test_negative_population_is_reported(tmp_path: Path) -> None:
+    path = tmp_path / "zcta.parquet"
+    _frame(population=pd.array([-666666666, None], dtype="Int64")).to_parquet(path)
+    with pytest.raises(data.DataFormatError, match="population"):
+        data.load_zctas(path)
+
+
+def test_wrong_crs_error_is_short_not_a_projjson_dump(tmp_path: Path) -> None:
+    path = tmp_path / "zcta.parquet"
+    _frame().to_crs("OGC:CRS84").to_parquet(path)
+    # CRS84 is lon/lat WGS84 but not EPSG:4326; either accepted or rejected, never a blob.
+    try:
+        data.load_zctas(path)
+    except data.DataFormatError as exc:
+        assert len(str(exc)) < 400 and "PROJJSON" not in str(exc) and '"type"' not in str(exc)
+
+
+def test_wrong_projected_crs_error_names_the_crs_briefly(tmp_path: Path) -> None:
+    path = tmp_path / "zcta.parquet"
+    _frame().to_crs(5070).to_parquet(path)
+    with pytest.raises(data.DataFormatError) as exc:
+        data.load_zctas(path)
+    assert "5070" in str(exc.value) and len(str(exc.value)) < 400
+
+
+def test_known_state_set_matches_the_build_mapping() -> None:
+    from zipcator import states
+
+    assert set(states.STATE_FIPS.values()) == data.VALID_STATES
+    assert {"FL", "PR", "DC", "GU"} <= data.VALID_STATES

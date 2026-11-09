@@ -16,6 +16,7 @@ import geopandas as gpd
 import pandas as pd
 
 from zipcator import config
+from zipcator.states import STATE_FIPS
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ REQUIRED_COLUMNS: tuple[str, ...] = (
 )
 #: Spec §4.3: the real build must yield at least this many ZCTAs.
 MIN_ROWS = 33_000
+VALID_STATES = frozenset(STATE_FIPS.values())
 
 
 class ZctaDataError(Exception):
@@ -73,18 +75,63 @@ def validate_zcta_frame(
         problems.append(
             f"{int(no_state.sum()):,} row(s) have no state, e.g. {list(zips[no_state][:3])}"
         )
+    unknown = ~no_state & ~state.isin(VALID_STATES)
+    if unknown.any():
+        problems.append(
+            f"{int(unknown.sum()):,} row(s) have an unknown state code, "
+            f"e.g. {sorted(set(state[unknown].astype(str)))[:3]}"
+        )
 
     geom = gdf.geometry
     n_null = int(geom.isna().sum())
     if n_null:
-        problems.append(f"{n_null:,} null geometries")
-    n_empty = int(geom.is_empty.sum())  # is_empty is False for None; nulls are reported above
-    if n_empty:
-        problems.append(f"{n_empty:,} empty geometries")
+        problems.append(f"{n_null:,} null geometries, e.g. {list(zips[geom.isna()][:3])}")
+    is_empty = geom.is_empty & ~geom.isna()
+    if is_empty.any():
+        problems.append(
+            f"{int(is_empty.sum()):,} empty geometries, e.g. {list(zips[is_empty][:3])}"
+        )
     if check_geometry_validity:
-        n_invalid = int((~geom[~geom.isna()].is_valid).sum())
+        usable_geom = ~geom.isna() & ~geom.is_empty
+        n_invalid = int((~geom[usable_geom].is_valid).sum())
         if n_invalid:
             problems.append(f"{n_invalid:,} invalid geometries")
+
+    problems += _representative_point_problems(gdf, zips)
+
+    pop = pd.to_numeric(gdf["population"], errors="coerce")
+    if (pop < 0).any():
+        problems.append(f"{int((pop < 0).sum()):,} row(s) have a negative population")
+    return problems
+
+
+def _representative_point_problems(gdf: gpd.GeoDataFrame, zips: pd.Series) -> list[str]:
+    """``intpt_lat/lon`` must be finite, in range, and lie inside the row's polygon.
+
+    ``find_zips`` measures ``center_distance_mi`` to this point, and swapped or NaN
+    coordinates would silently corrupt every distance.
+    """
+    lat = pd.to_numeric(gdf["intpt_lat"], errors="coerce")
+    lon = pd.to_numeric(gdf["intpt_lon"], errors="coerce")
+    bad = ~(lat.between(-90, 90) & lon.between(-180, 180))  # NaN compares False -> bad
+    problems: list[str] = []
+    if bad.any():
+        problems.append(
+            f"{int(bad.sum()):,} row(s) have a missing or out-of-range intpt_lat/intpt_lon, "
+            f"e.g. {list(zips[bad][:3])}"
+        )
+    geom = gdf.geometry
+    usable = ~bad & ~geom.isna() & ~geom.is_empty
+    if usable.any():
+        points = gpd.GeoSeries(
+            gpd.points_from_xy(lon[usable], lat[usable]), index=gdf.index[usable], crs=geom.crs
+        )
+        outside = ~geom[usable].covers(points, align=False)
+        if outside.any():
+            problems.append(
+                f"{int(outside.sum()):,} row(s) have an intpt that is not inside the polygon "
+                f"(swapped lat/lon?), e.g. {list(zips[usable][outside][:3])}"
+            )
     return problems
 
 
@@ -109,9 +156,13 @@ def load_zctas(path: Path | str | None = None) -> gpd.GeoDataFrame:
         ) from exc
 
     if gdf.crs is None or gdf.crs.to_epsg() != 4326:
-        raise DataFormatError(f"{path} must be in EPSG:4326 (got {gdf.crs}); rebuild the data.")
+        got = gdf.crs.to_string() if gdf.crs is not None else "no CRS"
+        raise DataFormatError(f"{path} must be in EPSG:4326 (got {got}); rebuild the data.")
     if "population" in gdf.columns:
-        gdf["population"] = pd.to_numeric(gdf["population"], errors="coerce").astype("Int64")
+        try:
+            gdf["population"] = pd.to_numeric(gdf["population"]).astype("Int64")
+        except (ValueError, TypeError) as exc:
+            raise DataFormatError(f"{path} has a non-integer population column ({exc}).") from exc
     problems = validate_zcta_frame(gdf)
     if problems:
         raise DataFormatError(
