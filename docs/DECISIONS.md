@@ -202,3 +202,62 @@ Format: date — decision — why — alternatives considered.
 - **Fixtures** are real recorded responses (tests/fixtures/geocode/README.md); non-US and
   malformed variants are derived in the tests because Nominatim must not be queried with
   deliberately foreign addresses. Live tests: 3 Census requests and 1 Nominatim request.
+
+## Phase 4 — export and CLI (2026-11-08)
+- **CSV and Excel (SPEC §5.4 "must open correctly in Excel … e.g. by quoting").** Quoting alone
+  does *not* work: Excel converts a quoted `"02108"` to the number 2108 when a CSV is opened by
+  double-click (only the Text Import Wizard/Power Query keep text). Established from knowledge,
+  with high confidence for Excel; **not verified here (no Excel available)**, and LibreOffice/Google
+  Sheets/Numbers behaviour is believed but unverified. So two files are offered:
+  1. **plain**: RFC 4180, CRLF, every text field quoted. Programs reading with `dtype=str` keep
+     zeros; `pd.read_csv` without `dtype` yields `2108` (tested, documented as the pitfall).
+  2. **Excel-safe** (`excel_safe=True`, CLI `--excel`): the ZIP cell is `="02108"`, written
+     RFC-escaped as `"=""02108"""`; Excel unquotes it to the text formula and displays `02108`.
+     Costs: that column is a formula (programs must strip it); Excel in comma-decimal/semicolon-list
+     locales (German, French) can mis-split any CSV (a known Excel limitation, not addressed).
+  **Defaults:** the *app* (phase 5) shows "Download CSV for Excel" first and "Download CSV
+  (plain, for scripts)" second, because the spec's audience opens files in Excel; the *CLI*
+  default stays plain (scripting) with `--excel` opt-in. **Open item: have someone confirm the
+  Excel variant in real Excel.**
+- **BOM only on the Excel-safe CSV.** Excel needs the UTF-8 BOM to show accents (Mayagüez), but a
+  BOM in front of the all-quoted header makes `csv.reader(open(f, encoding="utf-8"))` return a
+  header of `'﻿"ZIP"'`; pandas copes. The plain CSV therefore has no BOM.
+- **CSV columns.** "All columns" is interpreted as every on-screen column plus `ZIP area (sq
+  mi)`; the internal `intpt_lat`, `intpt_lon` and `land_area_sq_mi` are not exported
+  (land area differs from polygon area for 788 ZCTAs and would confuse; see phase 2 notes).
+  Population columns appear only when population data exists (the default artifact has none).
+  Numbers are rounded to **6 decimals** (SPEC §5.3 says "full precision internally"): tiny
+  overlaps such as 0.00001 % are not rounded to zero. `-0.0` is normalised.
+- **Spreadsheet formula injection.** Free-text cells (City, County, State) that start with
+  `= + - @ TAB CR` get a leading `'`. Real impact today is nil (0 of 33,791 values start with
+  one); a legitimate leading `-`/`@` would show a visible `'` (standard OWASP practice). ZIPs are
+  validated 5-digit strings and exempt; numbers never go through it.
+- **On-screen rounding (SPEC §5.3 "1 dp for display").** A listed ZIP always overlaps, so
+  overlap is floored at **0.1** (never "0.0") and capped at **99.9** unless within 1e-6 of fully
+  covered (never "100.0" for a partial ZIP; float noise like 99.99999999999999 still shows
+  100.0). Area in the radius is floored at 0.01 sq mi. The CSV is not clamped. Distances may show
+  `0.00` for a tiny positive nearest distance; the "Contains address" column disambiguates.
+- **CLI contract.** `zipcator ADDRESS [-r MILES 0.5–100] [-m PCT 0–100] [--csv FILE [--excel]]
+  [--zips [--newline]] [-v]`. Exit status: **0** success (including "no ZIP codes"), **1**
+  address not found / invalid or non-US location / geocoder down / unsupported (antimeridian)
+  circle / CSV write failure / unexpected error, **2** invalid arguments (argparse), **3** ZIP
+  data missing or unreadable, **130** Ctrl-C. Invalid *input text* is exit 1 (a location problem),
+  not 2, and is detected before the ~0.5 s data load. `--zips` writes only the list to stdout
+  (summary and "Wrote…" to stderr) so it pipes cleanly. A negative first coordinate must follow
+  `--` (options before it); the usage error says so.
+- **CLI robustness.** Redirected Windows stdout is cp1252: both streams are reconfigured to
+  replace unencodable characters, and to LF newlines when not a terminal. `| head` (BrokenPipe)
+  exits 0 quietly after the CSV has been written (CSV is written before any printing). Unexpected
+  exceptions become one line "Error: unexpected failure (Type: msg). Re-run with -v"; the
+  traceback only appears with `-v`. The CSV is written to a temp file and renamed, so a failure
+  never truncates an existing file.
+- **Logging in the CLI** is scoped to each `main()` call (a handler on the `zipcator` logger,
+  removed afterwards), not `logging.basicConfig`: that ignored `-v` on a second call and mutated the
+  embedder's root logger. `scripts/build_data.py` still uses `basicConfig(force=True)`; it is a
+  process entry point, and the tests restore root logging after each test.
+- **Requirements carried to phase 5 (UI).** One `default_geocoder()` instance for the process
+  (`st.cache_resource`); the Excel CSV button first; the table comes from `export.result_table`
+  (the same display rules as the CLI); show `export.summary_line`; the data build date from
+  `metadata.json`; `land_area_sq_mi` is never shown next to polygon areas unlabeled.
+- **Not exercised on real data:** population columns in the CLI/CSV (the default artifact has no
+  population; covered by synthetic tests) — verify when `--with-population` is built with a key.

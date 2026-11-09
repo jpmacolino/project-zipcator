@@ -21,6 +21,11 @@
 | 12 | 3 | "Location is outside the US" (SPEC §5.2.5) could never be produced: Census is US-only, Nominatim is filtered, and coordinates anywhere were accepted (Sydney, a swapped lat/lon) | The error existed only for a doctored mock | Coarse US/territory boxes checked in `locate()` for coordinates and geocoder results | `test_non_us_coordinates_raise_outside_the_us`, `test_a_geocoder_result_outside_the_us_is_rejected`, `test_swapped_census_coordinates_are_caught_downstream`, `test_us_and_territory_coordinates_are_accepted` |
 | 13 | 3 | `parse_input("٣٣٦٠٢")` / fullwidth digits became a non-ASCII "ZIP" that never matches a ZCTA (misleading "not a known ZIP") | `\d` matches Unicode digits | `[0-9]` regex + NFKC normalisation | `test_arabic_indic_digits_are_not_a_zip`, `test_fullwidth_digits_are_normalised_to_a_real_zip`, `test_near_miss_zips_are_not_zips` (`\d{4,5}` mutant killed) |
 | 14 | 3 | `CachedGeocoder` returned a shared mutable `candidates` list (a caller could poison later hits) and crashed with `KeyError` on a negative `maxsize`; removing the cache from `default_geocoder()` went unnoticed | No copy on read; no validation; no wiring test | Copy in/out, `maxsize` validated (0 disables), wiring test | `test_cached_results_cannot_be_poisoned_by_callers`, `test_negative_cache_size_is_rejected`, `test_default_geocoder_really_caches` |
+| 15 | 4 | `zipcator ... --zips --csv f` printed "Wrote N row(s)" on stdout, so a piped ZIP list was corrupted (help promised only the list) | Status message printed unconditionally to stdout | In `--zips` mode all non-list output goes to stderr | `test_zips_with_csv_keeps_stdout_to_the_list_only`, `test_zips_with_csv_pipes_nothing_but_the_list_on_stdout` (real process) |
+| 16 | 4 | `UnicodeEncodeError` traceback when stdout/stderr is redirected on Windows (cp1252) and the label or `--csv` path has characters outside it (CJK, emoji, macrons); CSV lost or exit code hidden behind 1; CRLF in piped output | Default stream encoding/newline, no error handler | Streams reconfigured: `errors="replace"`, LF when not a TTY | `test_streams_are_hardened_so_unencodable_text_cannot_crash_printing`, `test_piped_output_uses_unix_newlines`, `test_cp1252_redirected_output_with_a_cjk_csv_path_does_not_crash` (real process) |
+| 17 | 4 | Display showed `0.0 % / 0.00 sq mi` for a ZIP that is listed (real: Tampa 10 mi, Mayagüez 5 mi) and `100.0` for 2 partially covered NYC ZIPs | Plain 1-dp rounding of the extremes | `display_overlap` floor 0.1 / cap 99.9, `display_area` floor 0.01; CSV exact at 6 dp | `test_display_overlap_never_shows_zero_or_full_for_a_partial_zip`, `test_display_area_never_shows_zero_for_a_listed_zip`, `test_a_tiny_sliver_zip_is_never_shown_as_zero_percent_on_screen` |
+| 18 | 4 | `| head` gave a BrokenPipe traceback; Ctrl-C and unexpected exceptions leaked tracebacks; `zipcator "-14.27,-170.7"` said "address is required"; a bad address paid the data load; `--csv ""` was ignored; `-v` was ignored on a second call (`basicConfig`) | Narrow exception handling; argparse treats the token as an option; late validation; `basicConfig` is one-shot and global | BrokenPipe → quiet exit 0 (CSV written first); 130 on Ctrl-C; one-line unexpected-error message (traceback with `-v`); hint about `--`; parse before load; scoped logging handler; empty `--csv` is a usage error | `test_broken_pipe_is_a_quiet_success_not_a_traceback`, `test_closed_pipe_is_quiet_and_still_writes_the_csv` (real process), `test_ctrl_c_exits_130_quietly`, `test_unexpected_exception_is_a_clean_error_without_a_traceback`, `test_negative_first_coordinate_without_a_space_gets_a_helpful_hint`, `test_a_bad_address_fails_before_the_data_is_loaded`, `test_verbose_logs_progress_to_stderr_and_default_stays_quiet` |
+| 19 | 4 | The plain CSV had a UTF-8 BOM, so `csv.reader(open(f, encoding="utf-8"))` returned the header `'﻿"ZIP"'`; overwriting an existing CSV could truncate it on failure | BOM on every CSV; direct `write_bytes` | BOM only on the Excel-safe file; atomic temp-file + replace | `test_cli_plain_csv_has_no_bom_and_reads_with_plain_utf8`, `test_failed_csv_replace_keeps_the_previous_file_and_cleans_up` |
 
 ## Golden scenario verification (SPEC §8.3)
 <!-- For each scenario: inputs, expected results, HOW they were independently verified. -->
@@ -136,3 +141,45 @@ Nominatim request, all matching the parser built from recorded fixtures.
 Gates after fixes: ruff lint PASS · ruff format PASS · mypy PASS · pytest PASS (434 passed,
 99 % coverage, geocode.py 100 % line and branch) · tracked-file size PASS · `pytest -m network`
 4 passed (manual).
+
+### Phase 4 — export and CLI (tag `phase-4`)
+Reviewer verdict: *must not close until* four items were done; 0 HIGH. It ran the real CLI many times
+on the real data (2 Census requests, 0 Nominatim). Its mutation run: **79 of 92 killed**; the
+survivors were mostly untested behaviours (a vacuous `-v` test, only `City` defusing tested,
+min-overlap bounds, summary clauses, decimals, empty-result output). It also found that
+**coverage proved little** here (99.85 % while many behaviours were never asserted).
+Verified by the reviewer: bounds (`0.5`, `100`, `1e1` accepted; `0.49`, `100.0001`, `nan`, `-0` rejected),
+locked file / directory / non-ASCII and spaced paths give clean exit 1, a 100 mi NYC search takes
+~0.9 s of work, Census returning HTML/`null`/lists/NaN coordinates/HTTP 500 all give a clean exit 1.
+
+After the fixes I re-ran 21 targeted mutants (quote style, BOMs, decimals, defusing, de-dup,
+separators, display cap/floor, min-overlap and radius bounds, stdout/stderr routing, exit codes,
+parse-before-load, table index, atomic write): **19 were killed outright**. The other 2
+("defuse drops CR", "zip_list swaps separators") were reported as survivors only because my sed
+patterns containing `\n`/`\t` never matched and my no-op check was unreliable (the files already had
+uncommitted changes). Re-run with exact-string replacement, those two plus three more
+defusing/separator variants (5 mutants) were all **killed**. This is a sample of the behaviours the
+reviewer flagged, not a full mutation run.
+
+| Finding | Triage |
+|---|---|
+| M1 `--zips --csv` wrote "Wrote N row(s)" to stdout | **Fixed** (bug 15); real-process test |
+| M2 `UnicodeEncodeError` traceback on redirected cp1252 stdout/stderr | **Fixed** (bug 16); real-process test with a CJK `--csv` path under `PYTHONIOENCODING=cp1252` |
+| M3 default CSV does not open correctly in Excel | **Decided and logged** (bug 19 / DECISIONS.md): two variants, Excel-first in the app, plain default in the CLI. **Open: verify in real Excel** (not possible here) |
+| M4 vacuous `-v` test + surviving mutants | **Fixed**: `-v` now logs real progress and is tested; tests for min-overlap bounds/default, summary clauses and rounding, table/CSV decimals, every free-text column defused, empty-result output |
+| L BOM + quoted header breaks `csv.reader` under plain utf-8 | **Fixed** (bug 19): BOM only on the Excel-safe file |
+| L defusing prefix and "corrupting legitimate data" | **Accepted, documented** (0 real values affected); all three text columns now tested |
+| L misleading display at extremes (`0.0 %` listed ZIP, partial ZIP shown `100.0`) | **Fixed** (bug 17): floor 0.1 / cap 99.9 / area floor 0.01 on screen; CSV exact (6 dp) |
+| L BrokenPipe, Ctrl-C, unexpected exceptions leak tracebacks | **Fixed** (bug 18) |
+| L negative first coordinate gives "address is required" | **Fixed** (bug 18): hint about `--` (options go before it) |
+| L `logging.basicConfig` ignores `-v` on a repeat call and mutates the root logger | **Fixed** (bug 18): handler scoped to each call |
+| L bad address pays the data-load cost; `--csv ""` silently ignored | **Fixed** (bug 18) |
+| L CRLF in piped `--zips --newline` output; `-0.0`; non-atomic CSV write; dead `EXIT_USAGE` | **Fixed** |
+| L CSV omits `intpt_*` / `land_area_sq_mi` ("all columns") | **Decided, documented** (DECISIONS.md) |
+| L population columns never exercised on real data | **Open**: default artifact has no population (needs a Census key); synthetic tests cover them |
+| Test isolation: `scripts/build_data.py`'s `basicConfig(force=True)` left a closed-stream root handler that broke a later test | **Fixed in the test suite** (autouse fixture restores root logging) |
+| Own slip: a sed expanded `\xef\xbb\xbf` into a literal BOM inside two bytes literals (syntax error), committed in one commit | **Fixed** in the next commit (history not rewritten) |
+
+Gates after fixes: ruff lint PASS · ruff format PASS · mypy PASS · pytest PASS (602 passed, 99 %
+coverage, `cli.py` and `export.py` 100 %) · `pytest -m data` 34 passed, 1 skipped (the live CLI test, by
+design) · tracked-file size PASS. Live: `pytest -m network` 5 passed (manual, once).
