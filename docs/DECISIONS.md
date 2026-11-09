@@ -55,3 +55,59 @@ Format: date — decision — why — alternatives considered.
   `matches`, to feed the optional grey outlines on the map (SPEC §5.4).
 - **2026-11-08 — CI `push` trigger limited to `main`.** PR branches are covered by the
   `pull_request` trigger, avoiding duplicate runs.
+
+## Phase 2 — data build (2026-11-08)
+- **Source URLs verified 2026-11-08** (all HTTP 200 at the spec'd locations): D1
+  `cb_2020_us_zcta520_500k.zip` (66.7 MB, 33,791 ZCTAs, NAD83/EPSG:4269, all geometries valid),
+  D2 `tab20_zcta520_county20_natl.txt` (UTF-8 BOM, pipe-delimited; 903 leading/trailing rows are
+  counties with no ZCTA and are dropped), D3 `US.zip` (headerless TSV), D4 Census API. No URL
+  needed changing.
+- **Census API now requires a key.** Without one `api.census.gov` answers HTTP 200 with an HTML
+  "Missing Key" page. The build therefore (a) refuses `--with-population` without a key *before*
+  downloading anything, (b) detects the HTML/non-JSON reply and says how to get a free key, and
+  (c) scrubs the key from every error message. Population stays optional (SPEC §4.1 D4).
+- **GeoNames territory files added (D3).** `US.zip` has no territory ZIPs: all 149 blank-city
+  ZCTAs were PR (132), GU (7), VI (6), MP (3), AS (1). The small `PR/VI/GU/AS/MP.zip` files from the
+  same official location (same CC BY 4.0 licence) fill ZIPs that `US.zip` lacks; `US.zip` wins
+  on conflicts. Result: 0 blank cities in the real artifact. Alternative: leave PR blank
+  (rejected: golden scenario 7 is San Juan).
+- **`land_area_sq_mi` = Census `ALAND20`** (m² → sq mi), not recomputed from geometry. Why: it is
+  the Census's own land area, unaffected by our simplification or by shoreline clipping. Search
+  does *not* use it: overlap % divides by the projected polygon area (see phase 1 decisions).
+- **Primary county** = largest `AREALAND_PART`; ZCTAs with no land overlap fall back to largest
+  `AREAWATER_PART`, then lowest county GEOID (deterministic). **State** = state FIPS of that
+  county (so a ZCTA straddling a state line gets its primary county's state). State FIPS map
+  covers 50 states, DC, PR, AS, GU, MP, VI.
+- **Geometry in the artifact** is repaired with `make_valid`, reduced to polygonal parts, and rows
+  that end up empty are dropped with a warning (none were dropped in the real build). Rows with
+  no state are likewise dropped with a warning; the SPEC §4.3 validation (≥ 33,000 rows, 5-digit
+  unique text ZIPs, no null/empty/invalid geometry, state on every row) runs *before* the
+  artifact replaces an existing one; files are written via temp + rename.
+- **Representative point** is computed from the *simplified* geometry, so it is guaranteed inside
+  the stored polygon (checked for all 33,791 rows in the `data` smoke test).
+- **Simplification: size-adaptive, not uniform (SPEC §4.2 study).** Measured on the real data:
+  max overlap-% drift vs the *unsimplified* shapes over 7 scenarios (Tampa 5 mi, Okeechobee
+  rural 10 mi, Miami Beach 5 mi, Boston 3 mi, Honolulu 10 mi, San Juan 10 mi, Orlando 100 mi);
+  "ZIP diff" = ZIPs present in one result but not the other (0 everywhere):
+
+  | simplification | parquet MB | load s | Tampa | Okeechobee | Miami Beach | Boston | Honolulu | San Juan | Orlando 100 mi |
+  |---|---|---|---|---|---|---|---|---|---|
+  | uniform 0.0002° | 86.7 | 0.52 | 0.118 | 0.001 | 0.457 | 0.171 | 0.026 | 0.149 | 0.147 |
+  | uniform 0.0005° | 69.7 | 0.28 | 0.201 | 0.006 | 0.317 | **0.960** | 0.188 | 0.446 | 0.422 |
+  | uniform 0.001° | 48.9 | 0.22 | 0.298 | 0.076 | **1.297** | **2.372** | 0.474 | **1.665** | **1.242** |
+  | **adaptive rel 0.01, [0.0001°, 0.003°] (chosen)** | **43.7** | 0.24 | 0.171 | 0.087 | 0.152 | 0.138 | 0.212 | 0.226 | **0.239** |
+  | adaptive rel 0.02, [0.0001°, 0.003°] | 32.3 | 0.17 | 0.522 | 0.123 | 0.457 | 0.617 | 0.474 | 0.358 | 0.558 |
+
+  No uniform tolerance meets both limits (≤ ~50 MB *and* ±1 pp): 0.0005° is 69.7 MB, 0.001° drifts
+  up to 2.4 pp. Drift in percentage points is worst on small urban ZIPs while the vertices sit in
+  large rural ZIPs, so tolerance is now `rel × √area` (latitude-corrected) clipped to
+  [0.0001°, 0.003°]. Chosen `rel = 0.01`: 43.7 MB, worst drift 0.24 pp (4× margin to the ±1 pp
+  limit), load 0.24 s. Reproduce with `uv run python scripts/simplification_study.py`.
+  Alternatives rejected: uniform tolerance (above); `rel = 0.02` (smaller but only 1.6× margin);
+  coordinate rounding/zstd (changes file format for no accuracy benefit; snappy default is fine).
+  Residual risk: drift was measured on 7 scenarios; the phase 6 golden scenarios re-check it.
+- **`BUILD_VERSION = "2"`** (1 → 2 when adaptive simplification replaced the uniform tolerance).
+- **Raw download timestamps** are stored in `<file>.meta.json` sidecars written at download time;
+  files placed in `data/raw` by hand fall back to the file's mtime.
+- **Default ACS vintage 2023** (`B01003_001E`, ACS 5-year); override via `acs_year` in the library.
+  Not exercised against the live API (needs a key); covered by mocked tests only.
