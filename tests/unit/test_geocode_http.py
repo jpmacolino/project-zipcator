@@ -532,3 +532,50 @@ def test_error_hierarchy_and_exact_user_messages() -> None:
     assert str(gc.AddressNotFoundError()) == "Address not found"
     assert str(gc.GeocodeServiceError()) == SERVICE_DOWN
     assert str(gc.OutsideUSError()) == "Location is outside the US"
+
+
+# ================================================================ malformed-input robustness
+@pytest.mark.parametrize(
+    ("lat", "lon"),
+    [(None, 1), (1, None), ("abc", 1), (float("nan"), 1), (float("inf"), 1), (91, 0), (0, -181)],
+)
+def test_finite_coord_rejects_garbage_and_out_of_range(lat: object, lon: object) -> None:
+    assert gc._finite_coord(lat, lon) is None
+
+
+def test_finite_coord_accepts_numeric_strings_and_bounds() -> None:
+    assert gc._finite_coord("27.95", "-82.45") == (27.95, -82.45)
+    assert gc._finite_coord(90, 180) == (90.0, 180.0)
+
+
+def test_nominatim_empty_query_is_rejected_before_any_request(ft: FakeTime) -> None:
+    with responses.RequestsMock() as rsps:
+        with pytest.raises(gc.InvalidInputError):
+            nominatim(ft).geocode("  ")
+        assert len(rsps.calls) == 0
+
+
+@responses.activate
+def test_nominatim_non_list_json_is_a_service_error(ft: FakeTime) -> None:
+    responses.get(NOMINATIM_URL, json={"error": "Unable to geocode"})
+    with pytest.raises(gc.GeocodeServiceError):
+        nominatim(ft, retries=0).geocode("x")
+
+
+@responses.activate
+def test_nominatim_skips_non_object_items_and_bad_coordinates(ft: FakeTime) -> None:
+    good = copy.deepcopy(fixture("nominatim_match.json"))[0]  # type: ignore[index]
+    bad_coords = copy.deepcopy(good)
+    bad_coords["lat"] = "not-a-number"
+    responses.get(NOMINATIM_URL, json=["junk", None, bad_coords, good])
+    res = nominatim(ft).geocode("Tampa Theatre")
+    assert len(res.candidates) == 1 and res.lat == pytest.approx(27.9503814)
+
+
+@responses.activate
+def test_nominatim_only_unusable_us_items_means_not_found(ft: FakeTime) -> None:
+    good = copy.deepcopy(fixture("nominatim_match.json"))[0]  # type: ignore[index]
+    good["lon"] = None
+    responses.get(NOMINATIM_URL, json=[good])
+    with pytest.raises(gc.AddressNotFoundError):
+        nominatim(ft).geocode("Tampa Theatre")
