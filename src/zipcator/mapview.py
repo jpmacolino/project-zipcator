@@ -44,6 +44,7 @@ def ring_locations(polygon: Polygon) -> list[tuple[float, float]]:
 
 
 def overlap_colormap() -> LinearColormap:
+    """The sequential 0-100 % colour scale used to fill ZIP polygons."""
     return LinearColormap(
         _COLORS, vmin=0, vmax=100, caption="Overlap: % of each ZIP's area inside the radius"
     )

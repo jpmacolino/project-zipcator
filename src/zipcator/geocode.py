@@ -47,11 +47,15 @@ class InvalidInputError(GeocodeError, ValueError):
 
 
 class AddressNotFoundError(GeocodeError):
+    """Neither geocoder found the address (the message is exactly "Address not found")."""
+
     def __init__(self, message: str = "Address not found") -> None:
         super().__init__(message)
 
 
 class GeocodeServiceError(GeocodeError):
+    """The geocoding service is unreachable or misbehaving, after the allowed retry."""
+
     def __init__(
         self, message: str = "Geocoding service unavailable — try again or enter coordinates"
     ) -> None:
@@ -59,6 +63,8 @@ class GeocodeServiceError(GeocodeError):
 
 
 class OutsideUSError(GeocodeError):
+    """The location is outside the United States and its territories."""
+
     def __init__(self, message: str = "Location is outside the US") -> None:
         super().__init__(message)
 

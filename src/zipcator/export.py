@@ -160,6 +160,7 @@ def csv_bytes(result: SearchResult, *, excel_safe: bool = False) -> bytes:
 
 
 def csv_filename(result: SearchResult) -> str:
+    """A filesystem-safe name such as ``zipcator_27.9506_-82.4572_10mi.csv``."""
     lat, lon = result.center
     return f"zipcator_{lat:.4f}_{lon:.4f}_{result.radius_mi:g}mi.csv"
 

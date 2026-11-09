@@ -91,6 +91,8 @@ DEFAULT_SOURCES = Sources(
 
 @dataclass(frozen=True)
 class BuildResult:
+    """The published artifact path and the metadata written next to it."""
+
     path: Path
     metadata: dict[str, Any]
 

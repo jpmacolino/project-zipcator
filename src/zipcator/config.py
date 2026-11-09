@@ -29,25 +29,31 @@ def data_dir() -> Path:
 
 
 def zcta_path() -> Path:
+    """Path of the processed ZCTA artifact, ``<data dir>/zcta.parquet``."""
     return data_dir() / "zcta.parquet"
 
 
 def metadata_path() -> Path:
+    """Path of the build metadata, ``<data dir>/metadata.json``."""
     return data_dir() / "metadata.json"
 
 
 def raw_dir() -> Path:
+    """Directory caching the raw source downloads, ``<data dir>/raw``."""
     return data_dir() / "raw"
 
 
 def user_agent() -> str:
+    """``User-Agent`` for geocoder requests: ``ZIPCATOR_USER_AGENT`` or a descriptive default."""
     env = os.environ.get(ENV_USER_AGENT, "").strip()
     return env or f"zipcator/{__version__} (+{REPO_URL})"
 
 
 def nominatim_disabled() -> bool:
+    """True if ``ZIPCATOR_DISABLE_NOMINATIM`` turns the Nominatim fallback off."""
     return os.environ.get(ENV_DISABLE_NOMINATIM, "").strip().lower() in _TRUTHY
 
 
 def census_api_key() -> str | None:
+    """The Census API key from ``CENSUS_API_KEY`` (only needed for population), or ``None``."""
     return os.environ.get(ENV_CENSUS_API_KEY, "").strip() or None
