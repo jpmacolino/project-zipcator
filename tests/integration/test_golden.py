@@ -47,8 +47,12 @@ def zctas() -> gpd.GeoDataFrame:
 
 @pytest.fixture(scope="module")
 def raw() -> gpd.GeoDataFrame:
-    if not reference.RAW_ZCTA_ZIP.exists():
-        pytest.skip("raw Census download is not cached in data/raw")
+    if not reference.RAW_ZCTA_ZIP.exists():  # fail loudly: a skip would hide the golden tests
+        pytest.fail(
+            f"{reference.RAW_ZCTA_ZIP} not found: the golden scenarios need the raw Census "
+            "download. Run: uv run python scripts/build_data.py",
+            pytrace=False,
+        )
     return reference.load_raw()
 
 
@@ -199,12 +203,62 @@ def test_8_leading_zero_zips_boston(runs) -> None:  # type: ignore[no-untyped-de
 
 
 # ================================================================= pinned independent numbers
-def test_tampa_numbers_are_pinned_from_the_independent_reference(runs) -> None:  # type: ignore[no-untyped-def]
-    """Values below were computed once by the reference on the unsimplified shapes and are
-    pinned so a future regression in either implementation is noticed; they are not code output."""
+#: Overlap % per ZIP for scenario 1, computed once by ``reference.overlaps`` on the unsimplified
+#: raw shapes (geographiclib circle, EPSG:6933). Hard-coded, so a regression in *either*
+#: implementation, or a change in the source data, is noticed. They are not this code's output.
+TAMPA_5MI_PINNED = {
+    "33602": 100.0,
+    "33603": 100.0,
+    "33604": 58.43,
+    "33605": 100.0,
+    "33606": 100.0,
+    "33607": 76.15,
+    "33609": 96.07,
+    "33610": 37.93,
+    "33611": 38.33,
+    "33614": 52.09,
+    "33619": 42.02,
+    "33629": 94.42,
+}
+
+
+def test_tampa_overlaps_match_the_pinned_independent_numbers(runs) -> None:  # type: ignore[no-untyped-def]
     res, ref = runs["1 Tampa downtown 5 mi"]
-    pinned = ref.set_index("zip")["overlap_pct"]
-    assert pinned["33602"] == pytest.approx(100.0, abs=0.01)  # downtown ZIP lies wholly inside
-    assert pinned["33606"] == pytest.approx(100.0, abs=0.01)
-    assert 0 < pinned["33607"] < 100
-    assert len(pinned) == res.count
+    ref_pct = ref.set_index("zip")["overlap_pct"]
+    assert set(ref_pct.index) == set(TAMPA_5MI_PINNED)
+    for z, pct in TAMPA_5MI_PINNED.items():
+        assert ref_pct[z] == pytest.approx(pct, abs=0.05), f"reference drifted for {z}"
+    got = res.matches.set_index("zip")["overlap_pct"]
+    assert set(got.index) == set(TAMPA_5MI_PINNED)
+    for z, pct in TAMPA_5MI_PINNED.items():
+        assert got[z] == pytest.approx(pct, abs=MAX_DRIFT_PP), f"artifact differs for {z}"
+
+
+# ============================================ SPEC §9.3: rural regression with TRUE centroids
+OKEECHOBEE = SCENARIOS["2 Okeechobee rural 10 mi"][:2]
+
+
+@pytest.mark.parametrize("radius", [3.0, 5.0, 8.0, 10.0])
+def test_9_3_a_single_centre_point_search_misses_the_zip_the_address_is_in(  # type: ignore[no-untyped-def]
+    zctas, radius: float
+) -> None:
+    """Overlap finds the home ZIP (34972) and its neighbour (34974) at every radius from 3 to
+    10 miles. A search that tests one centre point per ZIP, whichever sense of 'centre', never
+    finds the home ZIP in that range: the representative point finds nothing at all, and the true
+    polygon centroid finds only the neighbour (and only from 10 miles)."""
+    lat, lon = OKEECHOBEE
+    overlap = set(find_zips(zctas, (lat, lon), radius).matches["zip"])
+    assert {"34972", "34974"} <= overlap
+    centre = reference.centre_point_matches(zctas, lat, lon, radius)
+    assert "34972" not in centre["representative point"]
+    assert "34972" not in centre["polygon centroid"]
+    assert centre["representative point"] == set()
+    assert centre["polygon centroid"] <= {"34974"}
+    assert (centre["polygon centroid"] == {"34974"}) is (radius == 10.0)
+
+
+def test_9_3_the_home_zip_only_appears_for_a_centre_point_search_at_twenty_miles(zctas) -> None:  # type: ignore[no-untyped-def]
+    lat, lon = OKEECHOBEE
+    centre = reference.centre_point_matches(zctas, lat, lon, 20.0)
+    assert "34972" in centre["polygon centroid"]  # its centroid is ~17 mi away
+    assert "34972" not in centre["representative point"]  # its representative point is ~20.2 mi

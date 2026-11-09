@@ -38,6 +38,13 @@ SCENARIOS = [
 
 
 def main() -> int:
+    if not reference.RAW_ZCTA_ZIP.exists():
+        print(
+            f"ERROR: {reference.RAW_ZCTA_ZIP} not found. Build the data first: "
+            "uv run python scripts/build_data.py",
+            file=sys.stderr,
+        )
+        return 1
     zctas = data.load_zctas()
     raw = reference.load_raw()
     print(
@@ -67,28 +74,37 @@ def main() -> int:
             f"{elapsed * 1000:.0f} ms |"
         )
 
-    print("\n**Rural regression (SPEC §9.3): overlap vs centroid-only**\n")
+    print("\n**Rural regression (SPEC §9.3): overlap vs a single centre point per ZIP**\n")
+    lat, lon = 27.2439, -80.8298
+    print("Okeechobee, FL (home ZIP 34972; its neighbour 34974). ZIPs found by each method:\n")
     print(
-        "| scenario | overlap search (ZIPs) | centroid-only (ZIPs whose representative point is "
-        "inside the circle) | ZIPs only overlap finds |"
+        "| radius | overlap search | representative point inside the circle | "
+        "true polygon centroid inside the circle |"
     )
     print("|---|---|---|---|")
-    for name in ("2 Rural: Okeechobee, FL", "5 Tiny radius: Jordan, MT"):
-        res, _ref, lat, lon, radius = results[name]
-        centroid_only = {
-            r.zip
-            for r in zctas.itertuples()
-            if Geodesic.WGS84.Inverse(lat, lon, r.intpt_lat, r.intpt_lon)["s12"] / MILE_M <= radius
-        }
-        overlap = set(res.matches["zip"])
-        missed = sorted(overlap - centroid_only)
-        rows = res.matches.set_index("zip")
-        detail = ", ".join(
-            f"{z} ({rows.loc[z, 'overlap_pct']:.1f}% of its area, rep. point "
-            f"{rows.loc[z, 'center_distance_mi']:.1f} mi away)"
-            for z in missed
+    for radius in (3.0, 5.0, 8.0, 10.0, 15.0, 20.0):
+        overlap = sorted(find_zips(zctas, (lat, lon), radius).matches["zip"])
+        centre = reference.centre_point_matches(zctas, lat, lon, radius)
+        print(
+            f"| {radius:g} mi | {overlap} | {sorted(centre['representative point']) or 'none'} | "
+            f"{sorted(centre['polygon centroid']) or 'none'} |"
         )
-        print(f"| {name} | {sorted(overlap)} | {sorted(centroid_only) or 'none'} | {detail} |")
+    res = results["2 Rural: Okeechobee, FL"][0].matches.set_index("zip")
+    print(
+        "\nDistance from the search point to each ZIP's centre point, and its overlap at 10 mi:\n"
+    )
+    print("| ZIP | overlap at 10 mi | representative point | true centroid |")
+    print("|---|---|---|---|")
+    cen = zctas.geometry.to_crs(reference.EQUAL_AREA).centroid.to_crs(4326)
+    for z in ("34972", "34974"):
+        i = zctas.index[zctas["zip"] == z][0]
+        rp = Geodesic.WGS84.Inverse(lat, lon, zctas.at[i, "intpt_lat"], zctas.at[i, "intpt_lon"])
+        ce = Geodesic.WGS84.Inverse(lat, lon, cen.y[i], cen.x[i])
+        print(
+            f"| {z} | {res.loc[z, 'overlap_pct']:.1f}% of its area "
+            f"({res.loc[z, 'area_in_radius_sq_mi']:.0f} sq mi) | {rp['s12'] / MILE_M:.1f} mi | "
+            f"{ce['s12'] / MILE_M:.1f} mi |"
+        )
     return 0
 
 

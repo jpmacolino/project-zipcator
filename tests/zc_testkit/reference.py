@@ -18,6 +18,7 @@ It imports nothing from ``zipcator``.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import geopandas as gpd
@@ -28,7 +29,9 @@ from geographiclib.geodesic import Geodesic
 from shapely.geometry import Point, Polygon
 
 ROOT = Path(__file__).resolve().parents[2]
-RAW_ZCTA_ZIP = ROOT / "data" / "raw" / "cb_2020_us_zcta520_500k.zip"
+# honours ZIPCATOR_DATA_DIR like zipcator.config does, without importing it
+_DATA_DIR = Path(os.environ.get("ZIPCATOR_DATA_DIR", "").strip() or ROOT / "data").expanduser()
+RAW_ZCTA_ZIP = _DATA_DIR / "raw" / "cb_2020_us_zcta520_500k.zip"
 MILE_M = 1609.344
 SQ_M_PER_SQ_MI = MILE_M**2
 EQUAL_AREA = "EPSG:6933"  # WGS 84 / NSIDC EASE-Grid 2.0 Global: equal-area worldwide
@@ -78,3 +81,35 @@ def overlaps(raw: gpd.GeoDataFrame, lat: float, lon: float, radius_mi: float) ->
 def circle_area_sq_mi(lat: float, lon: float, radius_mi: float) -> float:
     circle_m = gpd.GeoSeries([geodesic_circle(lat, lon, radius_mi)], crs=4326).to_crs(EQUAL_AREA)
     return float(circle_m.area.iloc[0] / SQ_M_PER_SQ_MI)
+
+
+def centre_point_matches(
+    zctas: gpd.GeoDataFrame, lat: float, lon: float, radius_mi: float
+) -> dict[str, set[str]]:
+    """ZIPs that a *single-centre-point* search would return, in the two usual senses.
+
+    ``zctas`` needs ``geometry`` (EPSG:4326), ``zip``, ``intpt_lat`` and ``intpt_lon``.
+
+    * ``"representative point"``: the point shapely guarantees lies inside the polygon.
+    * ``"polygon centroid"``: the true centre of mass, computed in an equal-area projection.
+    """
+    margin = radius_mi / 40.0 + 3.0  # degrees: generous, so no candidate is dropped
+    near = zctas[
+        (abs(zctas["intpt_lat"] - lat) < margin) & (abs(zctas["intpt_lon"] - lon) < margin * 2)
+    ]
+    centroids = gpd.GeoSeries(near.geometry, crs=4326).to_crs(EQUAL_AREA).centroid.to_crs(4326)
+
+    def miles(a: float, b: float) -> float:
+        return float(Geodesic.WGS84.Inverse(lat, lon, a, b)["s12"]) / MILE_M
+
+    rep = {
+        z
+        for z, la, lo in zip(near["zip"], near["intpt_lat"], near["intpt_lon"], strict=True)
+        if miles(la, lo) <= radius_mi
+    }
+    cen = {
+        z
+        for z, la, lo in zip(near["zip"], centroids.y, centroids.x, strict=True)
+        if miles(la, lo) <= radius_mi
+    }
+    return {"representative point": rep, "polygon centroid": cen}
