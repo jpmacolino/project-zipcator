@@ -44,3 +44,18 @@ def test_default_geocoder_with_nominatim_disabled_uses_census_only(
     monkeypatch.setenv("ZIPCATOR_DISABLE_NOMINATIM", "1")
     res = gc.default_geocoder().geocode("401 E Jackson St, Tampa, FL 33602")
     assert res.source == "census"
+
+
+@pytest.mark.data
+def test_cli_end_to_end_with_the_real_geocoder_and_real_data(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Phase 4 exit criterion: the whole pipeline, one Census request (Nominatim disabled)."""
+    from zipcator import cli
+
+    monkeypatch.setenv("ZIPCATOR_DISABLE_NOMINATIM", "1")
+    code = cli.main(["401 E Jackson St, Tampa, FL 33602", "--radius", "3", "--zips"])
+    out, err = capsys.readouterr()
+    zips = [z.strip() for z in out.strip().split(",")]
+    assert code == 0 and zips[0] == "33602"  # the address's own ZIP leads the list
+    assert "401 JACKSON ST, TAMPA" in err and "overlap a 3-mile radius" in err
