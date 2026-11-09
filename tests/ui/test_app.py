@@ -38,6 +38,10 @@ class FakeGeocoder:
             raise gc.AddressNotFoundError()
         if self.mode == "down":
             raise gc.GeocodeServiceError()
+        if self.mode == "hostile":
+            nasty = "**BOLD** [click](http://x.test/p) `tick` ${1+1} <b>"
+            cand = GeocodeCandidate(TAMPA[0], TAMPA[1], nasty, "census")
+            return GeocodeResult(TAMPA[0], TAMPA[1], nasty, "census", [cand])
         if "main st" in query.lower():
             cands = [
                 GeocodeCandidate(TAMPA[0], TAMPA[1], "100 MAIN ST, TAMPA, FL, 33602", "census"),
@@ -458,3 +462,19 @@ def test_each_download_button_gets_its_own_csv_variant(
     at = search(start(), "401 E Jackson St")
     assert not at.exception
     assert calls == [True, False]  # Excel-safe first (left button), plain second (right button)
+
+
+def test_a_hostile_matched_address_is_shown_as_text_and_cannot_break_the_map(env) -> None:  # type: ignore[no-untyped-def]
+    """The address comes from a geocoder (Nominatim's display_name is OSM user data). It must
+    not become markdown (images, links, bold) and must not escape the map's JS template."""
+    env.geocoder.mode = "hostile"
+    at = search(start(), "anything")
+    assert not at.exception and not at.error
+    caption = next(v for v in texts(at.caption) if v.startswith("Center: "))
+    summary = next(v for v in texts(at.markdown) if "ZIP code" in v and "overlap" in v)
+    for rendered in (caption, summary):
+        assert "\\*\\*BOLD\\*\\*" in rendered and "\\[click\\]\\(http" in rendered
+        assert "\\`tick\\`" in rendered and "\\<b\\>" in rendered
+    html = env.maps[0].map.get_root().render()
+    assert "`tick`" not in html and "${1+1}" not in html  # neutralised for folium's JS template
+    assert "&#96;tick&#96;" in html and "&#36;{1+1}" in html

@@ -30,6 +30,12 @@ _GREY = "#808080"
 #: Coordinates are rounded to 1e-5 degrees (~1 m) before going into the page: a full-precision
 #: float repr is ~15 digits per number and a 100-mile metro search has ~100k of them.
 _GRID = 1e-5
+_CIRCLE_CLASS = "zipcator-radius"
+#: A filled circle drawn above the ZIP layer would swallow every hover (the ZIP tooltip would
+#: never show inside the circle), yet it must stay on top or the ZIP fills would hide its outline.
+# !important: Leaflet sets pointer-events:auto on `.leaflet-pane > svg path.leaflet-interactive`,
+# which outranks a plain class selector.
+_CIRCLE_CSS = f"<style>path.{_CIRCLE_CLASS}{{pointer-events:none !important}}</style>"
 
 
 def ring_locations(polygon: Polygon) -> list[tuple[float, float]]:
@@ -43,7 +49,7 @@ def overlap_colormap() -> LinearColormap:
     )
 
 
-def _legend_html() -> str:
+def _legend_html(radius_mi: float) -> str:
     """A small fixed legend (top-right). branca's own legend is a large SVG that covers the map
     and its labels."""
     stops = ", ".join(f"{colour} {i * 25}%" for i, colour in enumerate(_COLORS))
@@ -56,7 +62,8 @@ def _legend_html() -> str:
         f'<div style="height:10px;width:170px;background:linear-gradient(to right,{stops})"></div>'
         '<div style="display:flex;justify-content:space-between;width:170px">'
         "<span>0%</span><span>50%</span><span>100%</span></div>"
-        '<div style="margin-top:3px;color:#555">share of each ZIP inside the circle</div></div>'
+        '<div style="margin-top:3px;color:#555">share of each ZIP inside the circle</div>'
+        f'<div style="margin-top:2px;color:#555">Circle: {radius_mi:g}-mile radius</div></div>'
     )
 
 
@@ -65,9 +72,21 @@ def _rounded(geom: BaseGeometry) -> BaseGeometry:
     return geom if out.is_empty else out
 
 
+def js_safe(text: str) -> str:
+    """Text that is safe both as tooltip HTML and inside folium's JS template literal.
+
+    folium renders a tooltip as ``bindTooltip(`<div>...</div>`)``. ``html.escape`` alone leaves
+    the backtick (ends the literal, blanking the map), ``${`` (executes script) and the backslash
+    (JS escape sequences) intact, so those become HTML character references: a browser shows
+    the original character, JavaScript sees none of them.
+    """
+    escaped = html.escape(text, quote=True)
+    return escaped.replace("\\", "&#92;").replace("`", "&#96;").replace("$", "&#36;")
+
+
 def _clean_text(value: object) -> str:
-    """HTML-escaped text for tooltips: GeoJSON tooltip values are inserted as HTML."""
-    return "" if value is None or value != value else html.escape(str(value), quote=True)
+    """Tooltip-safe text for a data value (GeoJSON tooltip values are inserted as HTML)."""
+    return "" if value is None or value != value else js_safe(str(value))
 
 
 def _feature_collection(frame: Any, *, with_overlap: bool) -> dict[str, Any]:
@@ -139,15 +158,18 @@ def build_map(
         fill=True,
         fill_color=_CIRCLE_COLOR,
         fill_opacity=0.03,
-        tooltip=f"{result.radius_mi:g}-mile radius",
+        # the class lets CSS make it transparent to the mouse (see _CIRCLE_CSS); folium drops
+        # unknown keywords such as `interactive=`, but it does pass `className` through
+        className=_CIRCLE_CLASS,
     ).add_to(m)
     folium.Marker(
         [lat, lon],
-        tooltip=html.escape(center_label, quote=True),
+        tooltip=js_safe(center_label),
         icon=folium.Icon(color="red", icon="map-marker", prefix="fa"),
     ).add_to(m)
     root: Any = m.get_root()  # a folium Figure; its stubs do not declare .html
-    root.html.add_child(folium.Element(_legend_html()))
+    root.html.add_child(folium.Element(_legend_html(result.radius_mi)))
+    root.header.add_child(folium.Element(_CIRCLE_CSS))
 
     minx, miny, maxx, maxy = result.circle.bounds
     m.fit_bounds([[miny, minx], [maxy, maxx]])

@@ -114,7 +114,7 @@ overlap_col.slider(
     "0 shows any overlap. The ZIP containing the center is always shown.",
 )
 options_col.checkbox(
-    "Show hidden ZIPs as grey outlines on the map",
+    "Show hidden ZIPs (grey outlines)",
     key="show_excluded",
     help="Only matters when the minimum overlap is above 0.",
 )
@@ -163,7 +163,7 @@ else:
     except geo.AntimeridianError as exc:
         st.error(str(exc))
     else:
-        st.markdown(f"**{export.summary_line(result, center.matched_address)}**")
+        st.markdown(ui.summary_markdown(result, center))
         if result.count == 0:
             st.info(
                 "No ZIP codes overlap this circle. Try a larger radius, or check that the "

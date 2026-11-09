@@ -51,7 +51,8 @@ def test_the_radius_circle_does_not_capture_the_mouse_so_zip_tooltips_work() -> 
     """The filled circle sat above the ZIP layer and took every hover: only '5-mile radius'
     ever showed inside it and the ZIP / city / overlap tooltip was unreachable."""
     html = _html(mapview.build_map(_result(), LABEL))
-    assert html.count('"interactive": false') == 1  # exactly the circle polygon
+    assert html.count('"className": "zipcator-radius"') == 1  # exactly the circle polygon
+    assert "path.zipcator-radius{pointer-events:none !important}" in html  # beats Leaflet CSS
     assert "mile radius`" not in html  # and it carries no tooltip of its own
 
 

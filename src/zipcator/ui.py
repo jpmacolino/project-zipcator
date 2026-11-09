@@ -12,7 +12,7 @@ from typing import Any
 
 import geopandas as gpd
 
-from zipcator import config, data
+from zipcator import config, data, export
 from zipcator.models import GeocodeResult, SearchResult
 from zipcator.search import find_zips
 
@@ -74,28 +74,67 @@ def zcta_note() -> str:
     )
 
 
-def footer_markdown(metadata: dict[str, Any] | None) -> str:
-    """Data sources, the GeoNames CC BY 4.0 attribution, the ZCTA note and the build date."""
+def footer_markdown(metadata: dict[str, Any] | None, nominatim_enabled: bool | None = None) -> str:
+    """Data sources, the GeoNames CC BY 4.0 attribution, the ZCTA note and the build date.
+
+    The geocoder sentence only mentions the Nominatim fallback when it is actually enabled
+    (``ZIPCATOR_DISABLE_NOMINATIM`` turns it off); map tiles are OpenStreetMap either way.
+    """
+    if nominatim_enabled is None:
+        nominatim_enabled = not config.nominatim_disabled()
     built = (metadata or {}).get("built_at")
     date = built[:10] if isinstance(built, str) and _DATE_RE.match(built) else "unknown"
+    if nominatim_enabled:
+        geocoding = (
+            "Addresses are located with the US Census Geocoder, falling back to OpenStreetMap "
+            "Nominatim; map tiles and fallback results © "
+        )
+    else:
+        geocoding = "Addresses are located with the US Census Geocoder; map tiles © "
     return (
         "**Data:** US Census Bureau 2020 ZIP Code Tabulation Areas (cartographic boundaries) and "
         "ZCTA-to-county relationship file (public domain); place names from "
         "[GeoNames](https://www.geonames.org), licensed "
-        "[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Addresses are located with "
-        "the US Census Geocoder, falling back to OpenStreetMap Nominatim; map tiles and "
-        "fallback results © [OpenStreetMap](https://www.openstreetmap.org/copyright) "
-        "contributors (ODbL).\n\n"
+        "[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). "
+        f"{geocoding}"
+        "[OpenStreetMap](https://www.openstreetmap.org/copyright) contributors (ODbL).\n\n"
         f"{zcta_note()}\n\n"
         f"Data built: {date}."
     )
 
 
+_MARKDOWN_SPECIAL = re.compile(r"([\\`*_\[\]()<>!#~$|:&])")
+
+
+def markdown_safe(text: str) -> str:
+    """Backslash-escape markdown markup so text from a geocoder renders as literal text.
+
+    Without this an address such as ``![x](http://host/pixel.png)`` becomes an image the browser
+    fetches (a tracking-pixel vector), and ``**`` / backticks / ``_`` mangle the line. Escaping an
+    ASCII punctuation character is always valid CommonMark, and the set is chosen so ordinary
+    addresses (letters, digits, spaces, commas, periods) are unchanged.
+    """
+    return _MARKDOWN_SPECIAL.sub(r"\\\1", text)
+
+
+def _label(located: GeocodeResult) -> str:
+    """The matched address as markdown-safe text. Labels generated here (ZIP, coordinates) are
+    trusted and keep their parentheses; anything a geocoder returned is escaped."""
+    if located.source in ("zip", "coordinates"):
+        return located.matched_address
+    return markdown_safe(located.matched_address)
+
+
 def center_caption(located: GeocodeResult) -> str:
     """'Center: …' line; a ZIP-only search is labelled as an approximate center (SPEC §5.1)."""
     if located.source == "coordinates":
-        return f"Center: {located.matched_address} (coordinates)"
-    return f"Center: {located.matched_address}"
+        return f"Center: {_label(located)} (coordinates)"
+    return f"Center: {_label(located)}"
+
+
+def summary_markdown(result: SearchResult, located: GeocodeResult) -> str:
+    """The bold one-sentence summary, with the geocoder's address made markdown-safe."""
+    return f"**{export.summary_line(result, _label(located))}**"
 
 
 def candidate_options(located: GeocodeResult) -> list[str]:
