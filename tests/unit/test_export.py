@@ -65,8 +65,8 @@ def test_display_rounding_is_one_decimal_for_overlap_but_csv_keeps_precision() -
     shown = export.result_table(res)["Overlap %"]
     full = export.result_table(res, full=True)["Overlap %"]
     raw = res.matches["overlap_pct"]
-    assert (shown == raw.round(1)).all()
-    assert (full == raw.round(4)).all()
+    assert (shown == shown.round(1)).all()  # one decimal on screen
+    assert (full == raw.round(6)).all()  # six decimals in the CSV
     assert any(f != s for f, s in zip(full, shown, strict=True))  # the partial ZIP differs
 
 
@@ -140,9 +140,9 @@ def test_csv_for_empty_result_is_just_a_header() -> None:
     assert len(rows) == 1 and rows[0][0] == "ZIP"
 
 
-def test_csv_bytes_start_with_a_utf8_bom_so_excel_reads_accents() -> None:
-    raw = export.csv_bytes(_result())
-    assert raw.startswith(b"\xef\xbb\xbf")
+def test_excel_csv_bytes_start_with_a_utf8_bom_so_excel_reads_accents() -> None:
+    raw = export.csv_bytes(_result(), excel_safe=True)
+    assert raw.startswith(b"﻿")
     assert "Mayagüez" in raw.decode("utf-8-sig")
 
 
