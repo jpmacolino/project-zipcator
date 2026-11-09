@@ -16,6 +16,15 @@ from zipcator import geocode as gc
 
 st.set_page_config(page_title="Zipcator: ZIP codes within a radius", page_icon="📍", layout="wide")
 
+_NUMBER_FORMATS = {
+    "Overlap %": "%.1f",
+    "Area in radius (sq mi)": "%.2f",
+    "Nearest distance (mi)": "%.2f",
+    "Center distance (mi)": "%.2f",
+    "Population": "%d",
+    "Est. pop in radius": "%d",
+}
+
 
 @st.cache_resource(show_spinner="Loading ZIP boundaries…")
 def _app_data() -> ui.AppData:
@@ -56,21 +65,25 @@ except data.ZctaDataError as exc:
     st.stop()
 
 # ----------------------------------------------------------------------------------- inputs
+# The controls sit in the page itself, not a sidebar: on a phone a collapsed sidebar hides the
+# only way to start a search.
 st.session_state.setdefault("radius_num", ui.DEFAULT_RADIUS_MI)
 st.session_state.setdefault("radius_slider", ui.DEFAULT_RADIUS_MI)
 st.session_state.setdefault("min_overlap", ui.DEFAULT_MIN_OVERLAP_PCT)
 
-with st.sidebar:
-    st.header("Search")
-    # A form: pressing Enter submits, and typing never triggers a search (SPEC §5.1).
-    with st.form("search_form", border=False):
-        st.text_input(
-            "Address, ZIP code, or lat, lon",
-            key="address",
-            placeholder="401 E Jackson St, Tampa, FL 33602",
-            help="A one-line US address, a 5-digit ZIP, or coordinates like 27.9506, -82.4572.",
-        )
-        submitted = st.form_submit_button("Search", type="primary", width="stretch")
+# A form: pressing Enter submits, and typing never triggers a search (SPEC §5.1).
+with st.form("search_form", border=False):
+    address_col, button_col = st.columns([5, 1], vertical_alignment="bottom")
+    address_col.text_input(
+        "Address, ZIP code, or lat, lon",
+        key="address",
+        placeholder="401 E Jackson St, Tampa, FL 33602",
+        help="A one-line US address, a 5-digit ZIP, or coordinates like 27.9506, -82.4572.",
+    )
+    submitted = button_col.form_submit_button("Search", type="primary", width="stretch")
+
+radius_col, overlap_col, options_col = st.columns([2, 2, 2], vertical_alignment="bottom")
+with radius_col:
     st.number_input(
         "Radius (miles)",
         min_value=ui.MIN_RADIUS_MI,
@@ -85,24 +98,26 @@ with st.sidebar:
         min_value=ui.MIN_RADIUS_MI,
         max_value=ui.MAX_RADIUS_MI,
         step=ui.RADIUS_STEP_MI,
+        format="%.1f",
         key="radius_slider",
         on_change=_radius_from_slider,
         label_visibility="collapsed",
     )
-    st.slider(
-        "Minimum overlap (%)",
-        min_value=0.0,
-        max_value=100.0,
-        step=1.0,
-        key="min_overlap",
-        help="Hide ZIPs with less than this share of their area inside the radius. "
-        "0 shows any overlap. The ZIP containing the center is always shown.",
-    )
-    st.checkbox(
-        "Show hidden ZIPs as grey outlines on the map",
-        key="show_excluded",
-        help="Only matters when the minimum overlap is above 0.",
-    )
+overlap_col.slider(
+    "Minimum overlap (%)",
+    min_value=0.0,
+    max_value=100.0,
+    step=1.0,
+    format="%.0f",
+    key="min_overlap",
+    help="Hide ZIPs with less than this share of their area inside the radius. "
+    "0 shows any overlap. The ZIP containing the center is always shown.",
+)
+options_col.checkbox(
+    "Show hidden ZIPs as grey outlines on the map",
+    key="show_excluded",
+    help="Only matters when the minimum overlap is above 0.",
+)
 
 # ------------------------------------------------------------------------------------ search
 if submitted:
@@ -124,7 +139,7 @@ if error:
     st.error(error)
 elif located is None:
     st.info(
-        "Enter an address, a ZIP code, or coordinates in the sidebar and press **Search**. "
+        "Enter an address, a ZIP code, or coordinates above and press **Search**. "
         "Try `401 E Jackson St, Tampa, FL 33602`, `33602`, or `27.9506, -82.4572`."
     )
 else:
@@ -148,7 +163,7 @@ else:
     except geo.AntimeridianError as exc:
         st.error(str(exc))
     else:
-        st.markdown(f"#### {export.summary_line(result, center.matched_address)}")
+        st.markdown(f"**{export.summary_line(result, center.matched_address)}**")
         if result.count == 0:
             st.info(
                 "No ZIP codes overlap this circle. Try a larger radius, or check that the "
@@ -164,7 +179,16 @@ else:
 
         if result.count:
             table = export.result_table(result)
-            st.dataframe(table, hide_index=True, width="stretch")
+            st.dataframe(
+                table,
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    name: st.column_config.NumberColumn(format=fmt)
+                    for name, fmt in _NUMBER_FORMATS.items()
+                    if name in table.columns
+                },
+            )
             if "Population" in table.columns:
                 st.caption(
                     "Estimated population in the radius assumes people are spread evenly across "

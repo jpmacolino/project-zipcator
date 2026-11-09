@@ -1,0 +1,9 @@
+# Committed UI defaults (no secrets: .streamlit/secrets.toml is gitignored).
+[theme]
+primaryColor = "#2c7fb8"
+
+[client]
+toolbarMode = "viewer"   # hides the "Deploy" button when running locally
+
+[browser]
+gatherUsageStats = false

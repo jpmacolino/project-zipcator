@@ -43,6 +43,23 @@ def overlap_colormap() -> LinearColormap:
     )
 
 
+def _legend_html() -> str:
+    """A small fixed legend (top-right). branca's own legend is a large SVG that covers the map
+    and its labels."""
+    stops = ", ".join(f"{colour} {i * 25}%" for i, colour in enumerate(_COLORS))
+    return (
+        '<div style="position:absolute;top:10px;right:10px;z-index:9999;'
+        "background:rgba(255,255,255,0.92);padding:6px 10px;border-radius:6px;"
+        "box-shadow:0 1px 4px rgba(0,0,0,0.3);font:12px/1.3 system-ui,sans-serif;color:#222;"
+        'pointer-events:none">'
+        '<div style="font-weight:600;margin-bottom:4px">Overlap with the radius</div>'
+        f'<div style="height:10px;width:170px;background:linear-gradient(to right,{stops})"></div>'
+        '<div style="display:flex;justify-content:space-between;width:170px">'
+        "<span>0%</span><span>50%</span><span>100%</span></div>"
+        '<div style="margin-top:3px;color:#555">share of each ZIP inside the circle</div></div>'
+    )
+
+
 def _rounded(geom: BaseGeometry) -> BaseGeometry:
     out = shapely.set_precision(geom, _GRID)
     return geom if out.is_empty else out
@@ -105,8 +122,8 @@ def build_map(
             style_function=lambda _feature: {
                 "fillOpacity": 0,
                 "color": _GREY,
-                "weight": 1,
-                "dashArray": "4 4",
+                "weight": 2,
+                "dashArray": "6 5",
             },
             tooltip=folium.GeoJsonTooltip(
                 fields=["zip", "city", "overlap_label"],
@@ -129,7 +146,8 @@ def build_map(
         tooltip=html.escape(center_label, quote=True),
         icon=folium.Icon(color="red", icon="map-marker", prefix="fa"),
     ).add_to(m)
-    cmap.add_to(m)
+    root: Any = m.get_root()  # a folium Figure; its stubs do not declare .html
+    root.html.add_child(folium.Element(_legend_html()))
 
     minx, miny, maxx, maxy = result.circle.bounds
     m.fit_bounds([[miny, minx], [maxy, maxx]])
