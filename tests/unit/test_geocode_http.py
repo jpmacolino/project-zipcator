@@ -471,7 +471,7 @@ def test_cache_hits_for_normalised_equivalent_queries() -> None:
     first = cached.geocode("401 E Jackson St, Tampa, FL 33602")
     again = cached.geocode("  401  e jackson st   TAMPA fl 33602 ")  # case, spacing, comma
     assert inner.calls == ["401 E Jackson St, Tampa, FL 33602"]
-    assert again is first
+    assert again == first
 
 
 def test_cache_distinguishes_different_addresses() -> None:
