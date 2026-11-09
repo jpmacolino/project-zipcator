@@ -142,7 +142,7 @@ def test_csv_for_empty_result_is_just_a_header() -> None:
 
 def test_excel_csv_bytes_start_with_a_utf8_bom_so_excel_reads_accents() -> None:
     raw = export.csv_bytes(_result(), excel_safe=True)
-    assert raw.startswith(b"﻿")
+    assert raw.startswith(b"\xef\xbb\xbf")
     assert "Mayagüez" in raw.decode("utf-8-sig")
 
 

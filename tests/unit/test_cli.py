@@ -133,7 +133,7 @@ def test_csv_option_writes_a_file_with_leading_zeros(
     code, out, _ = run([ADDRESS, "--csv", str(out_file)], capsys)
     assert code == 0 and str(out_file) in out
     raw = out_file.read_bytes()
-    assert not raw.startswith(b"﻿")  # plain CSV: no BOM (see DECISIONS.md)
+    assert not raw.startswith(b"\xef\xbb\xbf")  # plain CSV: no BOM (see DECISIONS.md)
     rows = list(csv.reader(io.StringIO(raw.decode("utf-8"), newline="")))
     assert rows[0][0] == "ZIP"
     assert {r[0] for r in rows[1:]} == {"33602", "33603", "02108"}
