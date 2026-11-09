@@ -259,3 +259,19 @@ def test_summary_line_mentions_the_min_overlap_filter() -> None:
     )
     line = export.summary_line(find_zips(gdf, TAMPA, 10, min_overlap_pct=50), "x")
     assert "at least 50%" in line
+
+
+# ------------------------------------------------------------------------ cell conversion
+def test_cell_converts_numpy_and_missing_values_for_csv() -> None:
+    import numpy as np
+
+    assert export._cell(np.int64(5), "Population") == 5
+    assert isinstance(export._cell(np.int64(5), "Population"), int)
+    assert isinstance(export._cell(np.float64(2.5), "Overlap %"), float)
+    assert export._cell(np.float32(1.5), "Overlap %") == 1.5
+    assert export._cell(float("nan"), "Overlap %") == ""
+    assert export._cell(None, "City") == "" and export._cell(pd.NA, "Population") == ""
+    assert export._cell(True, "Contains address") == "Yes"
+    assert export._cell(False, "Contains address") == "No"
+    assert export._cell("=cmd", "City") == "'=cmd"
+    assert export._cell("=cmd", "ZIP") == "=cmd"  # only the text columns are defused

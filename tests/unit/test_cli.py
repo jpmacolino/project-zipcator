@@ -145,7 +145,9 @@ def test_csv_excel_flag_writes_text_formula_zips(
     out_file = tmp_path / "excel.csv"
     code, _, _ = run([ADDRESS, "--csv", str(out_file), "--excel"], capsys)
     assert code == 0
-    assert '="02108"' in out_file.read_text(encoding="utf-8-sig")
+    text = out_file.read_text(encoding="utf-8-sig")
+    zips = [r[0] for r in csv.reader(io.StringIO(text, newline=""))][1:]
+    assert '="02108"' in zips  # the parsed cell; on disk it is the RFC-escaped "=""02108"""
 
 
 def test_csv_creates_missing_parent_directories(
@@ -298,3 +300,43 @@ def test_console_script_entry_point_is_declared() -> None:
     cfg = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     assert cfg["project"]["scripts"]["zipcator"] == "zipcator.cli:main"
     assert callable(cli.main)
+
+
+def test_excel_flag_without_csv_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.main([ADDRESS, "--excel"], geocoder=_Geocoder(), zctas=_zctas())
+    assert exc.value.code == 2 and "--csv" in capsys.readouterr().err
+
+
+def test_newline_flag_without_zips_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.main([ADDRESS, "--newline"], geocoder=_Geocoder(), zctas=_zctas())
+    assert exc.value.code == 2 and "--zips" in capsys.readouterr().err
+
+
+def test_zips_mode_keeps_stdout_clean_for_piping(capsys: pytest.CaptureFixture[str]) -> None:
+    code, out, err = run([ADDRESS, "--zips"], capsys)
+    assert code == 0
+    assert out.strip() == "33602, 33603, 02108"  # nothing but the list on stdout
+    assert "3 ZIP codes overlap" in err  # the summary went to stderr
+
+
+def test_zips_mode_with_no_results_prints_nothing_on_stdout(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    far = make_gdf({"99999": box(60_000, 0, 61_000, 1000)})
+    code = cli.main([ADDRESS, "--zips"], geocoder=_Geocoder(), zctas=far)
+    captured = capsys.readouterr()
+    assert code == 0 and captured.out == "" and "No ZIP codes" in captured.err
+
+
+def test_python_dash_m_zipcator_is_the_same_entry_point(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import runpy
+    import sys
+
+    monkeypatch.setattr(sys, "argv", ["zipcator", "--help"])
+    with pytest.raises(SystemExit) as exc:
+        runpy.run_module("zipcator", run_name="__main__")
+    assert exc.value.code == 0 and "--radius" in capsys.readouterr().out
