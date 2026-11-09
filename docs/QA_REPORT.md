@@ -26,6 +26,12 @@
 | 17 | 4 | Display showed `0.0 % / 0.00 sq mi` for a ZIP that is listed (real: Tampa 10 mi, Mayagüez 5 mi) and `100.0` for 2 partially covered NYC ZIPs | Plain 1-dp rounding of the extremes | `display_overlap` floor 0.1 / cap 99.9, `display_area` floor 0.01; CSV exact at 6 dp | `test_display_overlap_never_shows_zero_or_full_for_a_partial_zip`, `test_display_area_never_shows_zero_for_a_listed_zip`, `test_a_tiny_sliver_zip_is_never_shown_as_zero_percent_on_screen` |
 | 18 | 4 | `| head` gave a BrokenPipe traceback; Ctrl-C and unexpected exceptions leaked tracebacks; `zipcator "-14.27,-170.7"` said "address is required"; a bad address paid the data load; `--csv ""` was ignored; `-v` was ignored on a second call (`basicConfig`) | Narrow exception handling; argparse treats the token as an option; late validation; `basicConfig` is one-shot and global | BrokenPipe → quiet exit 0 (CSV written first); 130 on Ctrl-C; one-line unexpected-error message (traceback with `-v`); hint about `--`; parse before load; scoped logging handler; empty `--csv` is a usage error | `test_broken_pipe_is_a_quiet_success_not_a_traceback`, `test_closed_pipe_is_quiet_and_still_writes_the_csv` (real process), `test_ctrl_c_exits_130_quietly`, `test_unexpected_exception_is_a_clean_error_without_a_traceback`, `test_negative_first_coordinate_without_a_space_gets_a_helpful_hint`, `test_a_bad_address_fails_before_the_data_is_loaded`, `test_verbose_logs_progress_to_stderr_and_default_stays_quiet` |
 | 19 | 4 | The plain CSV had a UTF-8 BOM, so `csv.reader(open(f, encoding="utf-8"))` returned the header `'﻿"ZIP"'`; overwriting an existing CSV could truncate it on failure | BOM on every CSV; direct `write_bytes` | BOM only on the Excel-safe file; atomic temp-file + replace | `test_cli_plain_csv_has_no_bom_and_reads_with_plain_utf8`, `test_failed_csv_replace_keeps_the_previous_file_and_cleans_up` |
+| 20 | 5 | Hovering inside the radius circle never showed the ZIP / city / overlap tooltip, only "N-mile radius" (SPEC §5.4 tooltip effectively missing); AppTest and the first visual tests could not see it | The filled circle was added above the ZIP layer and was interactive; folium drops unknown options (`interactive=`); Leaflet's CSS outranks a plain class rule | Circle gets `className` + `path.zipcator-radius{pointer-events:none !important}`; radius shown in the legend | `test_zip_tooltips_work_inside_the_radius_circle` (real browser, 25 hover points), `test_the_radius_circle_does_not_capture_the_mouse_so_zip_tooltips_work` |
+| 21 | 5 | A backtick in the matched address blanked the map ("missing ) after argument list") and `${…}` would execute | folium puts the marker tooltip in a JS template literal; `html.escape` leaves backtick, `$`, backslash | `mapview.js_safe` (HTML character references) | `test_marker_label_cannot_break_out_of_the_javascript_template`, `test_hostile_map_label_does_not_break_the_map_or_run_script` (real browser) |
+| 22 | 5 | An address containing markdown rendered as bold/links/an image the browser fetched | Geocoder text interpolated into `st.markdown`/`st.caption` | `ui.markdown_safe` for geocoder labels; ZIP/coordinate labels (ours) untouched | `test_markdown_safe_neutralises_every_markup_character`, `test_hostile_address_text_renders_as_literal_text_not_markup` (real browser), `test_a_hostile_matched_address_is_shown_as_text_and_cannot_break_the_map` |
+| 23 | 5 | (test gap) removing `html.escape` on city names survived all tests | The old assertion looked at the page source, where JSON encoding already hides `<>&` | Assert the decoded GeoJSON property | `test_city_names_are_html_escaped_in_the_geojson_property_itself` |
+| 24 | 5 | Found by looking at the screenshots: controls hidden in a collapsed sidebar on phones; an oversized branca legend covering the map and labels; sliders showing raw floats ("5.00"); table numbers without fixed decimals; the summary as an enormous heading; barely visible hidden-ZIP outlines; the Deploy button | First-draft layout; branca legend is a large SVG | Controls in the page, compact HTML legend, `format=` on sliders and per-column table formats, bold summary line, dashed 2 px grey outlines, committed `.streamlit/config.toml` | `test_phone_width_with_results_fits_without_horizontal_scroll`, `_assert_map` (legend text, one polygon per ZIP, one marker), `test_min_overlap_with_grey_outlines`, `test_legend_is_present_and_uses_the_colour_scale` |
+| 25 | 5 | Footer claimed an OpenStreetMap Nominatim fallback while it was disabled; the checkbox label truncated at ~1000 px | Static footer text; long label | `footer_markdown(nominatim_enabled)` follows `ZIPCATOR_DISABLE_NOMINATIM`; shorter label | `test_footer_does_not_claim_a_nominatim_fallback_when_it_is_disabled`, `test_footer_follows_the_environment_by_default` |
 
 ## Golden scenario verification (SPEC §8.3)
 <!-- For each scenario: inputs, expected results, HOW they were independently verified. -->
@@ -183,3 +189,29 @@ reviewer flagged, not a full mutation run.
 Gates after fixes: ruff lint PASS · ruff format PASS · mypy PASS · pytest PASS (602 passed, 99 %
 coverage, `cli.py` and `export.py` 100 %) · `pytest -m data` 34 passed, 1 skipped (the live CLI test, by
 design) · tracked-file size PASS. Live: `pytest -m network` 5 passed (manual, once).
+
+### Phase 5 — Streamlit app and map (tag `phase-5`)
+Reviewer verdict: *must not close until* the circle/tooltip defect, the injection issues and the
+`html.escape` test gap were fixed; 1 HIGH, 3 MEDIUM. The reviewer drove the **real app in Chromium**
+(ports 8611–8614, 2 Census requests, 0 Nominatim) and ran a 43-mutant harness on a temp copy (38 killed
+or invalid). Verified OK there: both downloads (BOM, `="02108"`, filenames, 92 rows), Enter-to-submit,
+number/slider sync incl. rapid drags (0 exceptions), zoom/pan/click = 0 websocket frames, two
+simultaneous sessions without leakage, the real ambiguous address "100 Main St, Springfield" (7
+options, picker re-centres), missing and corrupt data messages, 100 mi performance (table in
+DECISIONS.md). The review was interrupted once by a usage limit and resumed from its saved state.
+
+| Finding | Triage |
+|---|---|
+| H1 ZIP tooltips unreachable inside the circle (circle above the ZIP layer took every hover) | **Fixed** (bug 20). My first fix (`interactive=False`) was silently dropped by folium; the second (a CSS class) was overridden by Leaflet's CSS; the real-browser hover test caught both, then passed |
+| M2 matched address injected into folium's JS template literal (backtick blanks the map, `${…}` runs) | **Fixed** (bug 21): `js_safe`; verified in a real browser with `${window.__pwned=2}` |
+| M3 markdown injection in the summary and "Center:" lines (bold/links/an image the browser fetched) | **Fixed** (bug 22): `markdown_safe`. A bare URL still auto-links with honest text: asserted harmless, documented |
+| M4 removing `html.escape` on city names survived (JSON encoding hid it) | **Fixed** (bug 23): asserts the decoded property value |
+| L surviving mutants: fit-bounds order, coordinate grid, legend, tooltip clamp, fill opacity, home outline colour, CSV filenames | **Fixed**: 18/18 targeted mutants killed. Filename/`token` mutants: filenames are asserted in a real-browser download test; the cache `token` is **deferred** (a rebuild needs a server restart anyway, so stale-frame risk is nil) |
+| L visual tests fragile / vacuous (two "Search" buttons once a table exists; legend assertion satisfied by the zoom control; no automated §9.5 check) | **Fixed**: form-scoped selector, legend text assertion, circle width vs scale bar in 3 scenarios |
+| L UX: sliders live while address is stale; emptied number box → 0.5; off-step radius accepted; truncated checkbox label; footer claimed Nominatim when disabled | Checkbox label and footer **fixed**; the rest **accepted and documented** |
+| L map rebuilt on every rerun (0.6 s NYC) | **Deferred** (within budget) |
+| L no phase 5 docs / QA rows | **Fixed** (this entry; bugs 20–25) |
+
+Gates after fixes: ruff lint PASS · ruff format PASS · mypy PASS · pytest PASS (699 passed, 99 %
+coverage; `mapview`/`ui` 100 %) · `pytest -m visual` 11 passed (real Chromium) · `pytest -m data`
+passes · tracked-file size PASS.

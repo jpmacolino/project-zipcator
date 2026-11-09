@@ -261,3 +261,55 @@ Format: date — decision — why — alternatives considered.
   `metadata.json`; `land_area_sq_mi` is never shown next to polygon areas unlabeled.
 - **Not exercised on real data:** population columns in the CLI/CSV (the default artifact has no
   population; covered by synthetic tests) — verify when `--with-population` is built with a key.
+
+## Phase 5 — Streamlit app and map (2026-11-08)
+- **Controls are in the page, not a sidebar.** The first version used a sidebar; the phone-width
+  screenshot showed it collapsed with a first screen saying "in the sidebar", i.e. no visible way
+  to search. The address box + Search sit in an `st.form` (Enter submits; typing never searches,
+  SPEC §5.1); radius (number input + slider, kept in sync by callbacks), minimum overlap and the
+  grey-outline toggle sit below it and stack on narrow screens.
+- **Radius / min-overlap react immediately; the address only on Search.** After a search, moving a
+  slider re-runs `find_zips` on the *stored* center (cached; no geocoding). Caveat (accepted): if
+  the address box is edited and a slider is then touched, results still refer to the last searched
+  center; the "Center: …" line always says which. Off-step radii typed into the number box (10.3) are
+  searched as typed; an emptied box becomes 0.5 (Streamlit behaviour).
+- **Caching.** One `default_geocoder()` per server process (`st.cache_resource`, so its cache and the
+  Nominatim limiter are shared by all sessions; thread-safe). Search results use `st.cache_data`
+  (`max_entries=64`) keyed by (data token, center, radius, threshold); `_zctas` is not hashed. The
+  token is `metadata.built_at` (file mtime without metadata). Measured pickled `SearchResult`: NYC
+  100 mi 2.5 MB, so the worst case is ~160 MB. **A rebuilt artifact needs a server restart**
+  (`cache_resource` holds the loaded data); the token only protects the search cache.
+- **Map.** The radius is the geodesic polygon (never `folium.Circle`); its pixel width equals
+  2 × radius on Leaflet's own scale bar within 4 % (asserted in 3 scenarios, SPEC §9.5). It is drawn
+  *above* the ZIP fills (otherwise their 60 % opacity hides its outline) but is transparent to the
+  mouse via `className` + CSS `pointer-events:none !important`: folium silently drops unknown
+  options such as `interactive=`, and Leaflet's stylesheet (`path.leaflet-interactive`) outranks a
+  plain class rule; my first fix failed for exactly that reason and was caught by the browser
+  hover test. The radius is stated in the legend instead of a circle tooltip. The legend is a small
+  fixed HTML box (branca's SVG legend was oversized and covered the map). Coordinates are rounded
+  to 1e-5° (~1 m): NYC 100 mi is ~3.6 MB of map HTML, ~5 MB over the websocket, all 1,854 polygons
+  render in 1.5–2.1 s end to end. `st_folium(returned_objects=[])`: pan/zoom/click send no frames
+  (measured: 0), so the app never reruns on map interaction.
+- **Untrusted text.** The matched address comes from a geocoder (Nominatim `display_name` is OSM
+  user data). Map tooltips use `js_safe`: HTML-escape plus HTML character references for backtick,
+  `$` and backslash, because folium puts tooltips inside a JS template literal (a backtick blanked
+  the map and `${…}` would execute). Markdown lines use `markdown_safe` (backslash-escapes the markup
+  set; ordinary addresses are unchanged); labels generated here (ZIP, coordinates) are trusted.
+  **Residual:** Markdown still auto-links a bare URL appearing in an address, with honest link text
+  (asserted: no disguised links, no image, nothing fetched); judged acceptable.
+- **Display.** Table numbers use fixed decimals via `column_config` (overlap %.1f, areas/distances
+  %.2f); the table, summary and CSV all come from `export` so the CLI and UI agree. The footer
+  mentions the Nominatim fallback only when it is enabled; map tiles are always attributed to
+  OpenStreetMap. `.streamlit/config.toml` (committed, no secrets) hides the local "Deploy" button and
+  sets the primary colour to the map's blue.
+- **Performance (SPEC §6), measured by the reviewer on the real artifact:** cold data load 0.57 s
+  (budget 5 s); 100 mi search NYC 0.30 s / Chicago 0.21 s / LA 0.15 s (budget 1 s); the map is
+  rebuilt on every rerun, even for a cached search (0.6 s for NYC): accepted, not worth a second
+  cache. Page stays responsive.
+- **Visual QA procedure.** `uv run pytest -m visual` (after `uv sync --group visual` and
+  `uv run playwright install chromium`) screenshots scenarios 1–3, grey outlines, empty/error states
+  and phone width into `qa/screenshots/`; those were opened and reviewed, which found most of the
+  layout defects in the QA report. The same suite asserts real-browser behaviour AppTest cannot see.
+- **Known, accepted:** a browser refresh drops all state (Streamlit); the map HTML is rebuilt per
+  rerun; the number box is not step-enforced; there is no keyboard shortcut beyond Enter in the
+  form. Colour is never the only encoding: overlap % is in the tooltip and the table.
