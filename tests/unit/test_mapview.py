@@ -108,8 +108,8 @@ def test_result_zips_are_one_geojson_layer_with_tooltips() -> None:
 
 def test_tooltip_fields_are_zip_city_and_overlap() -> None:
     layer = _geojson_layers(mapview.build_map(_result(), LABEL))[0]
-    tip = layer.tooltip
-    assert tip is not None and list(tip.fields) == ["zip", "city", "overlap_label"]
+    tips = [c for c in layer._children.values() if isinstance(c, folium.GeoJsonTooltip)]
+    assert len(tips) == 1 and list(tips[0].fields) == ["zip", "city", "overlap_label"]
     props = _features(layer)[0]["properties"]
     assert set(props) >= {"zip", "city", "overlap_label", "is_home", "overlap_pct"}
 
