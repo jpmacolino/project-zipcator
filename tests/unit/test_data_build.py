@@ -473,3 +473,57 @@ def test_adaptive_assemble_keeps_detail_on_small_zips_and_simplifies_large_ones(
 def test_default_simplification_is_adaptive_and_documented() -> None:
     d = db.DEFAULT_SIMPLIFICATION
     assert d.rel > 0 and d.min_deg < d.max_deg
+
+
+# ------------------------------------------------------------- GeoNames territory files
+def _territory_zip(code: str, rows: list[tuple[str, str]]) -> bytes:
+    import io
+    import zipfile
+
+    lines = [
+        "\t".join([code, z, city, "St", "ST", "", "", "", "", "18.0", "-66.0", "4"])
+        for z, city in rows
+    ]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(f"{code}.txt", "\n".join(lines) + "\n")
+    return buf.getvalue()
+
+
+def test_read_geonames_uses_the_member_named_after_the_zip(tmp_path: Path) -> None:
+    p = tmp_path / "PR.zip"
+    p.write_bytes(_territory_zip("PR", [("00901", "San Juan"), ("00907", "San Juan")]))
+    gn = db.read_geonames(p).set_index("zip")
+    assert gn.loc["00901", "city"] == "San Juan"
+
+
+def test_default_sources_include_the_territory_geonames_files() -> None:
+    urls = db.DEFAULT_SOURCES.geonames_extra_urls
+    assert {u.rsplit("/", 1)[1] for u in urls} == {"PR.zip", "VI.zip", "GU.zip", "AS.zip", "MP.zip"}
+    assert all(u.startswith("https://download.geonames.org/export/zip/") for u in urls)
+
+
+@responses.activate
+def test_build_fills_missing_cities_from_territory_files_without_overriding_us(
+    tmp_path: Path, raw_files: dict[str, bytes]
+) -> None:
+    src = db.Sources(
+        zcta_url=SRC.zcta_url,
+        county_rel_url=SRC.county_rel_url,
+        geonames_url=SRC.geonames_url,
+        acs_url_template=SRC.acs_url_template,
+        geonames_extra_urls=("https://example.test/PR.zip",),
+    )
+    _mock_sources(responses, raw_files)
+    # US.zip lacks 59001; the extra file supplies it and also tries to rename 02108.
+    responses.get(
+        "https://example.test/PR.zip",
+        body=_territory_zip("PR", [("59001", "Absarokee PR-file"), ("02108", "Wrong")]),
+    )
+    out = tmp_path / "d"
+    result = db.build(out, sources=src, min_rows=len(rd.ZCTAS))
+    row = data.load_zctas(result.path).set_index("zip")
+    assert row.loc["59001", "city"] == "Absarokee PR-file"
+    assert row.loc["02108", "city"] == "Boston"  # US file wins on conflicts
+    names = {s["name"] for s in result.metadata["sources"]}
+    assert "geonames_PR" in names

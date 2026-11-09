@@ -102,6 +102,8 @@ class Sources:
     county_rel_url: str
     geonames_url: str
     acs_url_template: str
+    #: Separate GeoNames files for US territories (not in US.zip); same licence and location.
+    geonames_extra_urls: tuple[str, ...] = ()
 
 
 DEFAULT_SOURCES = Sources(
@@ -112,6 +114,10 @@ DEFAULT_SOURCES = Sources(
     ),
     geonames_url="https://download.geonames.org/export/zip/US.zip",
     acs_url_template="https://api.census.gov/data/{year}/acs/acs5",
+    geonames_extra_urls=tuple(
+        f"https://download.geonames.org/export/zip/{code}.zip"
+        for code in ("PR", "VI", "GU", "AS", "MP")
+    ),
 )
 
 
@@ -267,14 +273,15 @@ _GEONAMES_COLUMNS = [
 def read_geonames(path: Path) -> pd.DataFrame:
     """D3: place name per ZIP (first row per postal code). CC BY 4.0 data."""
     _require_zip(path)
+    member = f"{path.stem}.txt"  # US.zip -> US.txt, PR.zip -> PR.txt
     try:
-        with zipfile.ZipFile(path) as zf, zf.open("US.txt") as fh:
+        with zipfile.ZipFile(path) as zf, zf.open(member) as fh:
             df = pd.read_csv(
                 fh, sep="\t", header=None, names=_GEONAMES_COLUMNS, dtype=str,
                 keep_default_na=False, encoding="utf-8",
             )  # fmt: skip
     except (KeyError, OSError, UnicodeDecodeError, pd.errors.ParserError) as exc:
-        raise BuildError(f"could not read US.txt from {path.name}: {exc}") from exc
+        raise BuildError(f"could not read {member} from {path.name}: {exc}") from exc
     out = pd.DataFrame({"zip": df["zip"].str.strip().str.zfill(5), "city": df["city"].str.strip()})
     return out.drop_duplicates("zip", keep="first").reset_index(drop=True)
 
@@ -432,11 +439,16 @@ def build(
     zcta_zip = fetch(sources.zcta_url)
     rel_txt = fetch(sources.county_rel_url)
     geonames_zip = fetch(sources.geonames_url)
+    extra_zips = [(url, fetch(url)) for url in sources.geonames_extra_urls]
 
     logger.info("reading sources")
     boundaries = read_boundaries(zcta_zip)
     rel = read_county_relationship(rel_txt)
-    geonames = read_geonames(geonames_zip)
+    # US file first: on a conflict it wins; territory files only fill ZIPs it lacks.
+    geonames = pd.concat(
+        [read_geonames(geonames_zip), *(read_geonames(p) for _, p in extra_zips)],
+        ignore_index=True,
+    ).drop_duplicates("zip", keep="first")
     population = None
     pop_downloaded = None
     if with_population:
@@ -463,6 +475,7 @@ def build(
         _source_record("zcta_boundaries", sources.zcta_url, zcta_zip),
         _source_record("county_relationship", sources.county_rel_url, rel_txt),
         _source_record("geonames", sources.geonames_url, geonames_zip),
+        *(_source_record(f"geonames_{p.stem}", url, p) for url, p in extra_zips),
     ]
     if pop_downloaded:
         source_records.append(
@@ -473,7 +486,7 @@ def build(
                 "bytes": None,
             }
         )
-    geonames_date = source_records[2]["downloaded_at"][:10]
+    geonames_date = source_records[2]["downloaded_at"][:10]  # index 2 = the US file
     metadata: dict[str, Any] = {
         "built_at": _now(),
         "zipcator_version": __version__,
