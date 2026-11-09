@@ -153,3 +153,52 @@ Format: date — decision — why — alternatives considered.
   files placed in `data/raw` by hand fall back to the file's mtime.
 - **Default ACS vintage 2023** (`B01003_001E`, ACS 5-year); override via `acs_year` in the library.
   Not exercised against the live API (needs a key); covered by mocked tests only.
+
+## Phase 3 — geocoding and input parsing (2026-11-08)
+- **Service behaviour verified live (2026-11-08) and recorded as fixtures:** Census returns
+  `coordinates.x` = longitude and `y` = latitude; "no match" is HTTP 200 with
+  `addressMatches: []` (not an error); ambiguous input returns several matches, best first (e.g.
+  `100 Main St, Springfield` spans several states). Nominatim with `countrycodes=us` returns
+  `address.country_code == "us"` for Puerto Rico too, so the US-only filter does not reject
+  territories (one reviewer request, "Calle San Francisco, San Juan"). Census is the primary for GU/VI/AS/MP.
+- **Fallback chain: the fallback's error wins.** If Census finds nothing and Nominatim is
+  unreachable we raise "service unavailable" (we cannot honestly say "not found"); if Nominatim
+  answers authoritatively ("not found" / "outside the US") that answer is used. Invalid input is
+  never retried against the fallback.
+- **Input rules (SPEC §5.1).** Text is NFKC-normalised (so fullwidth digits typed from a CJK
+  IME work), whitespace-collapsed, capped at 300 characters, and classified: `^[0-9]{5}(-[0-9]{4})?$`
+  is a ZIP (ZIP+4 is accepted and reduced to its ZIP); **two numbers and nothing else are always
+  coordinates**, so an out-of-range pair (`95, 10`, `12345 67890`) is an error rather than a nonsense
+  address lookup; anything else is an address. Digits are ASCII-only (`\d` matched Arabic-Indic
+  digits). Degree symbols get a "use decimal degrees" hint; `N/S/E/W` suffixes are *not*
+  detected (too many street addresses such as `123 N Main St`). Scientific notation, `NaN`,
+  underscores and parenthesised pairs are treated as addresses.
+- **Nominatim policy.** `countrycodes=us`, `User-Agent` from `ZIPCATOR_USER_AGENT` (default
+  `zipcator/<version> (+<repo url>)`, resolved per request), `limit=5`, **one process-wide
+  limiter** (the policy limit is per client, not per object) that also gates retries, 429/503
+  retried once; a numeric `Retry-After` up to 30 s replaces the backoff and a longer one abandons
+  the request. Results without a `country_code` are treated as foreign. An invalid User-Agent
+  (CR/LF) is a logged configuration error, not a retried outage.
+- **Timeouts/retries.** 10 s per request, `retries=1` with exponential backoff (negative values
+  clamp to 0). The 10 s is per request, not a total deadline: worst case is about
+  2 × 20 s per service. Accepted for v1.
+- **"Location is outside the US" (SPEC §5.2.5) is raised in `locate()`** for coordinates and
+  for geocoder results outside coarse US/territory bounding boxes (CONUS + near offshore,
+  Alaska incl. the Aleutians east of 180°, Hawaii, PR/USVI, Guam/CNMI, American Samoa; ~1.5° margins).
+  Why there: Census is US-only and Nominatim is filtered by `countrycodes=us`, so the error would
+  otherwise be unreachable; it also catches a swapped lat/lon from a geocoder. **Limitation:** a
+  box test cannot separate border towns (Toronto, Tijuana lie inside the CONUS box); those
+  coordinates proceed to the search and give the friendly empty/limited-results state. Offshore
+  points inside the margins also reach that empty state (SPEC §5.3).
+- **Cache.** `CachedGeocoder`: bounded LRU keyed by the normalised query (casefolded, commas and
+  whitespace ignored, so `1 Main St, Apt 2` and `1 Main St Apt 2` share an entry: harmless),
+  failures never cached, results copied in and out (`candidates` is a mutable list), `maxsize=0`
+  disables, negative is an error. `default_geocoder()` returns a *new* cache each call: **the
+  Streamlit app must create it once** (`st.cache_resource`), otherwise the cache is useless
+  (phase 5 requirement).
+- **Known, accepted:** no single-flight protection (concurrent identical queries each call the
+  service; the Nominatim limiter still serialises them); no response-size cap; Census results are only
+  range- and US-box-checked, not plausibility-checked against the ZIP in the returned address.
+- **Fixtures** are real recorded responses (tests/fixtures/geocode/README.md); non-US and
+  malformed variants are derived in the tests because Nominatim must not be queried with
+  deliberately foreign addresses. Live tests: 3 Census requests and 1 Nominatim request.

@@ -17,6 +17,10 @@
 | 8 | 2 | ZCTAs with no state or polygon were silently dropped (log line only), so "every row has a state" validation was vacuous and `min_rows` tolerated 791 losses; probe: bad FIPS gave "build OK, rows 4 (5 input zctas)" | `assemble()` filtered rows before validation | Rows kept; validation fails the build naming the ZIPs; `input_zcta_count` in metadata | `test_build_fails_loudly_naming_zips_that_have_no_state`, `test_assemble_keeps_rows_without_a_state_so_validation_can_flag_them`, `test_no_zcta_was_dropped_versus_the_raw_boundary_file` (data) |
 | 9 | 2 | `load_zctas` accepted NaN / swapped `intpt_lat/lon`, state `XX`, negative and non-numeric population (silently NA); CRS error dumped PROJJSON | Thin loader validation | Checks added (see DECISIONS.md); short CRS message | `test_nan_representative_point_is_rejected`, `test_swapped_lat_lon_representative_points_are_rejected`, `test_unknown_state_codes_are_reported`, `test_negative_population_is_reported`, `test_non_numeric_population_is_a_format_error_not_silently_blank`, `test_wrong_projected_crs_error_names_the_crs_briefly` |
 | 10 | 2 | Empty/corrupt cached raw file gave a raw `EmptyDataError` traceback; Census key reachable via `__cause__`/`__context__`; cache reused even if the source URL changed | Narrow exception handling; raise-from inside `except`; cache keyed by file name only | `BuildError` + `--refresh` hint; raise outside `except`; sidecar URL check; timestamp provenance in metadata | `test_empty_cached_relationship_file_is_a_build_error_with_refresh_hint`, `test_census_key_is_absent_from_the_whole_exception_chain`, `test_cache_from_a_different_url_is_not_reused` |
+| 11 | 3 | (test gap) a rate limiter that stopped updating its timestamp throttled only the 2nd request and let later ones burst, with all 358 tests green | No test made ≥ 3 back-to-back Nominatim calls | Tests assert every call is ≥ 1 s apart (`sleeps == [1,1,1,1]`) | `test_limiter_spaces_every_call_not_just_the_second`, `test_four_back_to_back_nominatim_requests_are_each_a_second_apart` (mutant killed) |
+| 12 | 3 | "Location is outside the US" (SPEC §5.2.5) could never be produced: Census is US-only, Nominatim is filtered, and coordinates anywhere were accepted (Sydney, a swapped lat/lon) | The error existed only for a doctored mock | Coarse US/territory boxes checked in `locate()` for coordinates and geocoder results | `test_non_us_coordinates_raise_outside_the_us`, `test_a_geocoder_result_outside_the_us_is_rejected`, `test_swapped_census_coordinates_are_caught_downstream`, `test_us_and_territory_coordinates_are_accepted` |
+| 13 | 3 | `parse_input("٣٣٦٠٢")` / fullwidth digits became a non-ASCII "ZIP" that never matches a ZCTA (misleading "not a known ZIP") | `\d` matches Unicode digits | `[0-9]` regex + NFKC normalisation | `test_arabic_indic_digits_are_not_a_zip`, `test_fullwidth_digits_are_normalised_to_a_real_zip`, `test_near_miss_zips_are_not_zips` (`\d{4,5}` mutant killed) |
+| 14 | 3 | `CachedGeocoder` returned a shared mutable `candidates` list (a caller could poison later hits) and crashed with `KeyError` on a negative `maxsize`; removing the cache from `default_geocoder()` went unnoticed | No copy on read; no validation; no wiring test | Copy in/out, `maxsize` validated (0 disables), wiring test | `test_cached_results_cannot_be_poisoned_by_callers`, `test_negative_cache_size_is_rejected`, `test_default_geocoder_really_caches` |
 
 ## Golden scenario verification (SPEC §8.3)
 <!-- For each scenario: inputs, expected results, HOW they were independently verified. -->
@@ -103,3 +107,32 @@ blanks, validate-then-replace, atomic writes) were all checked accurate.
 Gates after fixes: ruff lint PASS · ruff format PASS · mypy PASS · pytest PASS (254 passed,
 99 % coverage, data_build 100 %) · `pytest -m data` 23 passed (~30 s) · tracked-file size PASS.
 Artifact: 33,791 ZCTAs, 40.2 MB, loads in ~0.5 s.
+
+### Phase 3 — geocoding and input parsing (tag `phase-3`)
+Reviewer verdict: *must not close until* 5 items were done; 0 HIGH. The reviewer found no wrong
+results from the shipped behaviour and ran **66 single-line mutants** of `geocode.py`: 53 killed,
+2 patterns missing, 11 survived; the spec §8.2 mutants were killed (limiter removed, shared
+interval, `countrycodes` dropped, User-Agent dropped, x/y swap, retry count/backoff, timeout,
+US filter, chain conditions, env disable, cache casefold/LRU, coordinate bounds). It confirmed the
+live tests are opt-in (`pytest` and `pytest -m "not slow"` both skip them; 4 live tests are
+skipped, not run) and polite. Live run (manual, once): **4 passed**: 3 Census requests, 1
+Nominatim request, all matching the parser built from recorded fixtures.
+
+| Finding | Triage |
+|---|---|
+| M1 no test with ≥ 3 Nominatim calls: a limiter that stops updating `_last` survived | **Fixed** (bug 11); mutant re-run and killed |
+| M2 "Location is outside the US" unreachable in any real flow | **Fixed** (bug 12): coarse US/territory boxes in `locate()`, DECISIONS.md records the border-town limitation |
+| M3 `\d` accepts non-ASCII digits as ZIPs | **Fixed** (bug 13): `[0-9]` + NFKC; the `\d{4,5}` mutant is killed |
+| L cache: negative `maxsize` crashes, shared mutable `candidates`, no default-cache test | **Fixed** (bug 14); stampede protection **deferred** (limiter serialises; documented) |
+| L no input length cap (3,000-char input read as an outage); degree notation silently an address | **Fixed**: 300-char cap with a clear message; degree-symbol hint. `N/S/E/W` letters deliberately not detected (would break `123 N Main St`) |
+| L `Retry-After` ignored; `retries=-1` makes no request; invalid User-Agent retried as an outage | **Fixed** |
+| L Census coordinates not plausibility-checked (swap, Paris) | **Fixed** for the swap/foreign cases via the US-box check; plausibility against the returned ZIP **deferred** |
+| L parsing quirks: `-0`, `None` input, unknown-ZIP wording ("00501 is not a ZIP") | **Fixed**; newline-separated numbers and `12 34` remain "two numbers = coordinates" by design (documented) |
+| L surviving mutants: 500 transient, JSON body on 4xx, uppercase `US`, chain on invalid input, `limit`, candidate order, `;` separator, explicit/late-bound User-Agent | **Fixed**: tests added; 500-transient mutant re-run and killed |
+| L design choices not logged in DECISIONS.md | **Fixed** |
+| L 10 s is a per-request timeout, not a total deadline; no response-size cap | **Deferred, documented** (worst case ≈ 40 s/service; acceptable for v1) |
+| `default_geocoder()` builds a new cache per call | **Carried to phase 5**: the app must hold one instance |
+
+Gates after fixes: ruff lint PASS · ruff format PASS · mypy PASS · pytest PASS (434 passed,
+99 % coverage, geocode.py 100 % line and branch) · tracked-file size PASS · `pytest -m network`
+4 passed (manual).
