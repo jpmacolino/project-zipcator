@@ -301,7 +301,7 @@ def test_build_end_to_end_on_synthetic_inputs(tmp_path: Path, raw_files: dict[st
         "geonames",
     }
     assert all(s["url"].startswith("https://") and s["downloaded_at"] for s in meta["sources"])
-    assert "CC BY 4.0" in meta["vintages"]["geonames"] or "geonames" in meta["vintages"]
+    assert "CC BY 4.0" in meta["vintages"]["geonames"]
 
 
 @responses.activate

@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import re
 import time
+from pathlib import Path
 
 import geopandas as gpd
-import pandas as pd
+import pyogrio
 import pytest
+import shapely
 
 from zipcator import config, data
 
@@ -142,4 +144,90 @@ def test_artifact_is_gitignored() -> None:
         ["git", "check-ignore", "data/zcta.parquet"], cwd=root, capture_output=True, text=True
     )
     assert out.returncode == 0, "data/zcta.parquet must be ignored by git"
-    assert pd.notna(out.stdout)
+
+
+# ------------------------------------- QA phase 2: no loss, clean partition, bounded drift
+def _raw_path(name: str) -> Path:
+    path = config.raw_dir() / name
+    if not path.exists():
+        pytest.skip(f"raw download {name} is not cached in {config.raw_dir()}")
+    return path
+
+
+def test_no_zcta_was_dropped_versus_the_raw_boundary_file(zctas: gpd.GeoDataFrame) -> None:
+    """Independent of the build code: compare against the raw shapefile's own ZIP list."""
+    raw = _raw_path("cb_2020_us_zcta520_500k.zip")
+    raw_zips = pyogrio.read_dataframe(
+        f"zip://{raw.resolve().as_posix()}", columns=["ZCTA5CE20"], read_geometry=False
+    )["ZCTA5CE20"]
+    assert set(raw_zips) == set(zctas["zip"])
+    assert len(zctas) == len(raw_zips)
+    meta = data.load_metadata()
+    assert meta is not None
+    assert meta["input_zcta_count"] == meta["row_count"] == len(zctas)
+
+
+@pytest.fixture(scope="module")
+def projected(zctas: gpd.GeoDataFrame) -> gpd.GeoSeries:
+    return zctas.set_index("zip").geometry.to_crs(5070)  # equal-area CONUS albers (km² checks)
+
+
+def test_neighbouring_zips_do_not_overlap_after_simplification(projected: gpd.GeoSeries) -> None:
+    """The raw Census file is a clean partition (0 km² overlap). Per-polygon simplification
+    produced 9,198 km² of pairwise overlap; coverage simplification must keep it ~0."""
+    arr = projected.to_numpy()
+    left, right = projected.sindex.query(projected, predicate="intersects")
+    keep = left < right
+    overlap_m2 = shapely.area(shapely.intersection(arr[left[keep]], arr[right[keep]])).sum()
+    assert overlap_m2 / 1e6 < 0.01  # km² across the whole country
+
+
+def test_total_area_is_preserved_by_simplification(projected: gpd.GeoSeries) -> None:
+    raw = _raw_path("cb_2020_us_zcta520_500k.zip")
+    exact = pyogrio.read_dataframe(f"zip://{raw.resolve().as_posix()}").to_crs(5070)
+    ratio = projected.area.sum() / exact.geometry.area.sum()
+    assert ratio == pytest.approx(1.0, abs=0.001)  # measured 0.99996 for the per-polygon version
+
+
+#: Scenarios deliberately different from scripts/simplification_study.py's (which chose the
+#: tolerance), so this checks the claim rather than the fit: (name, (lat, lon), radius_mi)
+DRIFT_SCENARIOS = [
+    ("Texarkana border, 15 mi", (33.4418, -94.0377), 15.0),
+    ("Nags Head / Outer Banks, 3 mi", (35.9574, -75.6241), 3.0),
+    ("Anchorage, 10 mi", (61.2181, -149.9003), 10.0),
+    ("Brooklyn, 3 mi", (40.6782, -73.9442), 3.0),
+    ("Key West, 10 mi", (24.5551, -81.7800), 10.0),
+    ("Rural Montana (Jordan), 20 mi", (47.3178, -106.9111), 20.0),
+]
+
+
+def test_overlap_pct_drift_vs_unsimplified_shapes_stays_within_spec(
+    zctas: gpd.GeoDataFrame,
+) -> None:
+    """SPEC §4.2: simplification may move overlap % by at most ±1 percentage point.
+
+    The unsimplified reference is rebuilt from the raw downloads with tolerance 0.
+    """
+    from zipcator import data_build as db
+    from zipcator.search import find_zips
+
+    raw = config.raw_dir()
+    exact = db.assemble(
+        db.read_boundaries(_raw_path("cb_2020_us_zcta520_500k.zip")),
+        db.read_county_relationship(_raw_path("tab20_zcta520_county20_natl.txt")),
+        db.read_geonames(_raw_path("US.zip")),
+        tolerance=0.0,
+    )
+    assert raw.exists()
+    worst = 0.0
+    for name, center, radius in DRIFT_SCENARIOS:
+        want = find_zips(exact, center, radius).matches.set_index("zip")["overlap_pct"]
+        got = find_zips(zctas, center, radius).matches.set_index("zip")["overlap_pct"]
+        both = want.index.intersection(got.index)
+        drift = float((got[both] - want[both]).abs().max())
+        worst = max(worst, drift)
+        assert drift <= 1.0, f"{name}: drift {drift:.3f} pp"
+        only_one = want.index.symmetric_difference(got.index)
+        # a ZIP present in only one result must be a sliver (< 0.05 %) in the other
+        assert all(max(want.get(z, 0.0), got.get(z, 0.0)) < 0.05 for z in only_one), name
+    assert worst <= 0.5  # measured worst is ~0.13 pp on the study scenarios
