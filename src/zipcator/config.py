@@ -25,7 +25,7 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 def data_dir() -> Path:
     """Directory holding the built artifact (default: ``<repo>/data``)."""
     env = os.environ.get(ENV_DATA_DIR, "").strip()
-    return Path(env) if env else Path(__file__).resolve().parents[2] / "data"
+    return Path(env).expanduser() if env else Path(__file__).resolve().parents[2] / "data"
 
 
 def zcta_path() -> Path:

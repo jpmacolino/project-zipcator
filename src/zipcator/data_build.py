@@ -49,6 +49,9 @@ _UPDATE_HINT = (
     "DEFAULT_SOURCES in src/zipcator/data_build.py (scripts/build_data.py wraps it), "
     "then note it in docs/DECISIONS.md."
 )
+_CACHE_HINT = (
+    "If this file came from the cache it may be corrupt or an error page: re-run with --refresh."
+)
 _KEY_HINT = (
     "The Census API requires a (free) key: https://api.census.gov/data/key_signup.html . "
     "Pass --census-api-key KEY or set the CENSUS_API_KEY environment variable."
@@ -115,8 +118,11 @@ def download(
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists() and not refresh:
-        logger.info("using cached %s (pass --refresh to re-download)", dest.name)
-        return dest
+        cached_url = _read_sidecar(dest).get("url")
+        if cached_url in (None, url):  # None: hand-placed file, trusted
+            logger.info("using cached %s (pass --refresh to re-download)", dest.name)
+            return dest
+        logger.info("cached %s came from a different URL; re-downloading", dest.name)
     logger.info("downloading %s", url)
     part = dest.with_name(dest.name + ".part")
     getter = session or requests
@@ -145,18 +151,28 @@ def download(
     return dest
 
 
-def _source_record(name: str, url: str, path: Path) -> dict[str, Any]:
-    sidecar = path.with_name(path.name + ".meta.json")
+def _read_sidecar(path: Path) -> dict[str, Any]:
     try:
-        info = json.loads(sidecar.read_text(encoding="utf-8"))
+        info = json.loads(path.with_name(path.name + ".meta.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        ts = datetime.fromtimestamp(path.stat().st_mtime, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        info = {"downloaded_at": ts, "bytes": path.stat().st_size}
+        return {}
+    return info if isinstance(info, dict) else {}
+
+
+def _source_record(name: str, url: str, path: Path) -> dict[str, Any]:
+    info = _read_sidecar(path)
+    if "downloaded_at" in info:
+        stamp, origin = info["downloaded_at"], "download_sidecar"
+        size = info.get("bytes")
+    else:  # hand-placed file: the best available timestamp is its mtime
+        stamp = datetime.fromtimestamp(path.stat().st_mtime, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        origin, size = "file_mtime", path.stat().st_size
     return {
         "name": name,
         "url": url,
-        "downloaded_at": info["downloaded_at"],
-        "bytes": info.get("bytes"),
+        "downloaded_at": stamp,
+        "timestamp_source": origin,
+        "bytes": size,
     }
 
 
@@ -203,13 +219,13 @@ def read_county_relationship(path: Path) -> pd.DataFrame:
               "AREAWATER_PART"]  # fmt: skip
     try:
         df = pd.read_csv(path, sep="|", dtype=str, encoding="utf-8-sig", keep_default_na=False)
-    except (OSError, UnicodeDecodeError, pd.errors.ParserError) as exc:
-        raise BuildError(f"could not read {path.name}: {exc}") from exc
+    except (OSError, UnicodeDecodeError, pd.errors.ParserError, pd.errors.EmptyDataError) as exc:
+        raise BuildError(f"could not read {path.name}: {exc}. {_CACHE_HINT}") from exc
     missing = [c for c in needed if c not in df.columns]
     if missing:
         raise BuildError(
             f"schema mismatch in {path.name}: missing column(s) {', '.join(missing)}. "
-            "The Census may have changed the relationship-file format."
+            f"The Census may have changed the relationship-file format. {_CACHE_HINT}"
         )
     df = df[df["GEOID_ZCTA5_20"].str.strip() != ""].copy()  # counties with no ZCTA
     df["land"] = pd.to_numeric(df["AREALAND_PART"], errors="coerce").fillna(0)
@@ -245,8 +261,16 @@ def read_geonames(path: Path) -> pd.DataFrame:
                 fh, sep="\t", header=None, names=_GEONAMES_COLUMNS, dtype=str,
                 keep_default_na=False, encoding="utf-8",
             )  # fmt: skip
-    except (KeyError, OSError, UnicodeDecodeError, pd.errors.ParserError) as exc:
-        raise BuildError(f"could not read {member} from {path.name}: {exc}") from exc
+    except (
+        KeyError,
+        OSError,
+        UnicodeDecodeError,
+        pd.errors.ParserError,
+        pd.errors.EmptyDataError,
+    ) as exc:
+        raise BuildError(f"could not read {member} from {path.name}: {exc}. {_CACHE_HINT}") from exc
+    if df.empty:
+        raise BuildError(f"{member} in {path.name} has no rows. {_CACHE_HINT}")
     out = pd.DataFrame({"zip": df["zip"].str.strip().str.zfill(5), "city": df["city"].str.strip()})
     return out.drop_duplicates("zip", keep="first").reset_index(drop=True)
 
@@ -265,14 +289,17 @@ def fetch_population(
         params["key"] = api_key
     getter = session or requests
     logger.info("fetching ACS %d population by ZCTA", year)
+    failure: str | None = None
     try:
         resp = getter.get(
             url, params=params, timeout=_TIMEOUT, headers={"User-Agent": config.user_agent()}
         )
     except requests.RequestException as exc:
-        raise BuildError(
-            f"network error calling the Census API: {_scrub(str(exc), api_key)}"
-        ) from exc
+        failure = _scrub(str(exc), api_key)
+    if failure is not None:
+        # Raised outside the except block on purpose: no __cause__/__context__ may carry the
+        # raw message, which can embed the request URL and so the API key.
+        raise BuildError(f"network error calling the Census API: {failure}")
     if resp.status_code != 200:
         raise BuildError(f"Census API {url} returned HTTP {resp.status_code}. {_KEY_HINT}")
     try:

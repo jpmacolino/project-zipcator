@@ -15,6 +15,14 @@ import sys
 from zipcator import config, data_build
 
 
+class _Formatter(logging.Formatter):
+    """Plain progress lines; warnings and errors carry their level so they stand out."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        message = super().format(record)
+        return message if record.levelno < logging.WARNING else f"{record.levelname}: {message}"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Download and process ZCTA data into data/zcta.parquet."
@@ -32,7 +40,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(_Formatter("%(message)s"))
+    logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
     try:
         result = data_build.build(
             config.data_dir(),

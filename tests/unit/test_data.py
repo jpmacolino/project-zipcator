@@ -211,3 +211,16 @@ def test_known_state_set_matches_the_build_mapping() -> None:
 
     assert set(states.STATE_FIPS.values()) == data.VALID_STATES
     assert {"FL", "PR", "DC", "GU"} <= data.VALID_STATES
+
+
+def test_non_numeric_population_is_a_format_error_not_silently_blank(tmp_path: Path) -> None:
+    path = tmp_path / "zcta.parquet"
+    _frame(population=["3500", "lots"]).to_parquet(path)
+    with pytest.raises(data.DataFormatError, match="population"):
+        data.load_zctas(path)
+
+
+def test_population_stored_as_numeric_strings_is_accepted(tmp_path: Path) -> None:
+    path = tmp_path / "zcta.parquet"
+    _frame(population=["3500", "120"]).to_parquet(path)
+    assert data.load_zctas(path)["population"].tolist() == [3500, 120]

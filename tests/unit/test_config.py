@@ -62,3 +62,9 @@ def test_census_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.census_api_key() == "abc123"
     monkeypatch.setenv("CENSUS_API_KEY", "   ")
     assert config.census_api_key() is None
+
+
+def test_data_dir_expands_a_leading_tilde(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ZIPCATOR_DATA_DIR", "~/zipcator-data")
+    assert config.data_dir() == Path.home() / "zipcator-data"
+    assert "~" not in str(config.zcta_path())

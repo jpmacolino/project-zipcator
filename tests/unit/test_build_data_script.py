@@ -76,3 +76,22 @@ def test_unknown_flag_exits_with_usage_error() -> None:
     with pytest.raises(SystemExit) as exc:
         script.main(["--nope"])
     assert exc.value.code == 2
+
+
+def test_warnings_are_visibly_marked_but_progress_is_plain(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import logging
+
+    def noisy_build(data_dir: Path, **kw: Any) -> data_build.BuildResult:
+        log = logging.getLogger("zipcator.data_build")
+        log.info("downloading things")
+        log.warning("12% of ZIPs have no city name")
+        return data_build.BuildResult(path=data_dir / "z", metadata={"row_count": 1})
+
+    monkeypatch.setattr(data_build, "build", noisy_build)
+    monkeypatch.setenv("ZIPCATOR_DATA_DIR", str(tmp_path))
+    script.main([])
+    out = capsys.readouterr().out
+    assert "\ndownloading things\n" in "\n" + out  # plain progress line
+    assert "WARNING: 12% of ZIPs have no city name" in out
