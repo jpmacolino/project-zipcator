@@ -104,7 +104,7 @@ def test_assemble_drops_zctas_with_no_polygon_area(caplog: pytest.LogCaptureFixt
         crs="EPSG:4326",
     )
     rel = pd.DataFrame({"zip": ["11111", "22222"], "state": ["FL", "FL"], "county": ["A", "B"]})
-    gdf = db.assemble(boundaries, rel, pd.DataFrame(columns=["zip", "city"]), tolerance=0.0)
+    gdf = db.assemble(boundaries, rel, pd.DataFrame(columns=["zip", "city"]), simplification=None)
     assert gdf["zip"].tolist() == ["11111"]
     assert "no polygon area" in caplog.text
 

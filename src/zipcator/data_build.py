@@ -10,13 +10,14 @@ import json
 import logging
 import zipfile
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import geopandas as gpd
+import numpy as np
 import pandas as pd
 import pyogrio
 import requests
@@ -28,12 +29,41 @@ from zipcator import __version__, config, data
 
 logger = logging.getLogger(__name__)
 
-BUILD_VERSION = "1"
-#: Douglas-Peucker tolerance in degrees (≈ 55 m at the equator). See docs/DECISIONS.md for
-#: the measured overlap-% drift study that chose it.
-DEFAULT_TOLERANCE = 0.0005
+BUILD_VERSION = "2"
 DEFAULT_ACS_YEAR = 2023
 SQ_M_PER_SQ_MI = 2_589_988.110336
+
+
+@dataclass(frozen=True)
+class Simplification:
+    """Size-adaptive Douglas-Peucker simplification (topology-preserving).
+
+    A polygon's tolerance is ``rel`` x its characteristic size (√area, corrected for
+    latitude), clipped to ``[min_deg, max_deg]`` degrees. Overlap-% error from simplifying is
+    roughly (tolerance / polygon size), so a fixed tolerance wrecks small urban ZIPs while
+    barely thinning the huge rural ZIPs that hold most vertices. Chosen empirically; see the
+    simplification study in docs/DECISIONS.md.
+    """
+
+    rel: float = 0.01
+    min_deg: float = 0.0001
+    max_deg: float = 0.003
+
+    @classmethod
+    def uniform(cls, tolerance_deg: float) -> Simplification:
+        """A constant tolerance for every polygon (used by the study and in tests)."""
+        return cls(rel=0.0, min_deg=tolerance_deg, max_deg=tolerance_deg)
+
+    def tolerances(self, geoms: np.ndarray) -> np.ndarray:
+        """Per-geometry tolerance in degrees for an array of lon/lat geometries."""
+        miny = shapely.bounds(geoms)[:, 1]
+        maxy = shapely.bounds(geoms)[:, 3]
+        coslat = np.cos(np.radians((miny + maxy) / 2.0))
+        size_deg = np.sqrt(shapely.area(geoms) * coslat)
+        return np.asarray(np.clip(self.rel * size_deg, self.min_deg, self.max_deg), dtype=float)
+
+
+DEFAULT_SIMPLIFICATION = Simplification()
 _CHUNK = 1 << 20
 _TIMEOUT = (15, 300)
 
@@ -315,7 +345,7 @@ def assemble(
     geonames: pd.DataFrame,
     population: pd.DataFrame | None = None,
     *,
-    tolerance: float = DEFAULT_TOLERANCE,
+    simplification: Simplification | None = DEFAULT_SIMPLIFICATION,
 ) -> gpd.GeoDataFrame:
     """Join the sources, simplify, repair geometry and add representative points."""
     gdf = boundaries.merge(_with_text_zip(rel), on="zip", how="left")
@@ -336,8 +366,13 @@ def assemble(
         gdf = gdf[~no_state]
 
     geoms = gdf.geometry
-    if tolerance > 0:
-        geoms = geoms.simplify(tolerance, preserve_topology=True)
+    if simplification is not None:
+        tol = simplification.tolerances(geoms.to_numpy())
+        geoms = gpd.GeoSeries(
+            shapely.simplify(geoms.to_numpy(), tol, preserve_topology=True),
+            index=geoms.index,
+            crs=geoms.crs,
+        )
     invalid = ~geoms.is_valid
     if invalid.any():
         logger.info("repairing %d invalid geometries", int(invalid.sum()))
@@ -374,7 +409,7 @@ def build(
     refresh: bool = False,
     with_population: bool = False,
     census_api_key: str | None = None,
-    tolerance: float = DEFAULT_TOLERANCE,
+    simplification: Simplification | None = DEFAULT_SIMPLIFICATION,
     sources: Sources = DEFAULT_SOURCES,
     session: requests.Session | None = None,
     min_rows: int = data.MIN_ROWS,
@@ -413,8 +448,8 @@ def build(
         )
         pop_downloaded = _now()
 
-    logger.info("assembling (simplification tolerance %g degrees)", tolerance)
-    gdf = assemble(boundaries, rel, geonames, population, tolerance=tolerance)
+    logger.info("assembling (simplification: %s)", simplification)
+    gdf = assemble(boundaries, rel, geonames, population, simplification=simplification)
 
     logger.info("validating %s rows", f"{len(gdf):,}")
     problems = data.validate_zcta_frame(gdf, min_rows=min_rows, check_geometry_validity=True)
@@ -444,7 +479,11 @@ def build(
         "zipcator_version": __version__,
         "build_script_version": BUILD_VERSION,
         "row_count": len(gdf),
-        "simplification_tolerance_deg": tolerance,
+        "simplification": (
+            None
+            if simplification is None
+            else {"method": "douglas-peucker, topology-preserving", **asdict(simplification)}
+        ),
         "population_included": population is not None,
         "land_area_source": "Census ALAND20 (square meters) converted to square miles",
         "sources": source_records,

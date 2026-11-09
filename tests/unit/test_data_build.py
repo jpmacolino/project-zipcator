@@ -216,7 +216,7 @@ def test_assemble_joins_and_computes_representative_points() -> None:
         _boundaries({"11111": donut}),
         _rel(["11111"]),
         pd.DataFrame({"zip": ["11111"], "city": ["Town"]}),
-        tolerance=0.0,
+        simplification=None,
     )
     row = gdf.iloc[0]
     assert row.city == "Town" and row.state == "FL" and row.county == "X County"
@@ -243,7 +243,7 @@ def test_assemble_tolerates_missing_city_and_drops_rows_without_state(
         _boundaries(geoms),
         _rel(["11111"]),  # 22222 has no county row -> no state
         pd.DataFrame({"zip": [], "city": []}),
-        tolerance=0.0,
+        simplification=None,
     )
     assert gdf["zip"].tolist() == ["11111"] and pd.isna(gdf.iloc[0].city)
     assert "22222" in caplog.text
@@ -255,7 +255,7 @@ def test_assemble_simplifies_within_tolerance_and_stays_valid() -> None:
         _boundaries({"11111": circle}),
         _rel(["11111"]),
         pd.DataFrame(columns=["zip", "city"]),
-        tolerance=0.001,
+        simplification=db.Simplification.uniform(0.001),
     )
     simple = gdf.geometry.iloc[0]
     assert len(simple.exterior.coords) < len(circle.exterior.coords) / 4
@@ -270,7 +270,7 @@ def test_assemble_repairs_invalid_geometry() -> None:
         _boundaries({"11111": bowtie}),
         _rel(["11111"]),
         pd.DataFrame(columns=["zip", "city"]),
-        tolerance=0.0,
+        simplification=None,
     )
     assert gdf.geometry.is_valid.all() and not gdf.geometry.is_empty.any()
     assert gdf.geometry.iloc[0].geom_type in {"Polygon", "MultiPolygon"}
@@ -283,7 +283,7 @@ def test_assemble_joins_population() -> None:
         _rel(["11111"]),
         pd.DataFrame(columns=["zip", "city"]),
         pop,
-        tolerance=0.0,
+        simplification=None,
     )
     assert gdf.iloc[0].population == 42
 
@@ -293,7 +293,9 @@ def test_assemble_joins_population() -> None:
 def test_build_end_to_end_on_synthetic_inputs(tmp_path: Path, raw_files: dict[str, bytes]) -> None:
     _mock_sources(responses, raw_files)
     out = tmp_path / "data"
-    result = db.build(out, sources=SRC, min_rows=len(rd.ZCTAS), tolerance=0.0001)
+    result = db.build(
+        out, sources=SRC, min_rows=len(rd.ZCTAS), simplification=db.Simplification.uniform(0.0001)
+    )
     assert result.path == out / "zcta.parquet" and result.path.exists()
     gdf = data.load_zctas(result.path)  # also proves the loader accepts what the builder writes
     assert len(gdf) == len(rd.ZCTAS)
@@ -304,7 +306,9 @@ def test_build_end_to_end_on_synthetic_inputs(tmp_path: Path, raw_files: dict[st
     assert gdf.crs.to_epsg() == 4326 and gdf.geometry.is_valid.all()
     meta = json.loads((out / "metadata.json").read_text())
     assert meta["row_count"] == len(rd.ZCTAS)
-    assert meta["simplification_tolerance_deg"] == 0.0001
+    assert (
+        meta["simplification"]["min_deg"] == 0.0001 and meta["simplification"]["max_deg"] == 0.0001
+    )
     assert meta["population_included"] is False
     assert meta["build_script_version"] == db.BUILD_VERSION
     for key in ("built_at", "zipcator_version", "vintages", "sources"):
@@ -414,3 +418,58 @@ def test_default_sources_are_the_official_census_and_geonames_urls() -> None:
 
 def test_land_area_conversion_constant() -> None:
     assert math.isclose(db.SQ_M_PER_SQ_MI, 2_589_988.110336)
+
+
+# ------------------------------------------------------------------ adaptive simplification
+def test_simplification_tolerance_scales_with_polygon_size_and_is_clipped() -> None:
+    import numpy as np
+
+    s = db.Simplification(rel=0.01, min_deg=0.0001, max_deg=0.003)
+    tiny, mid, huge = box(0, 0, 0.001, 0.001), box(0, 0, 0.2, 0.2), box(0, 0, 5, 5)
+    tol = s.tolerances(np.array([tiny, mid, huge], dtype=object))
+    assert tol[0] == pytest.approx(0.0001)  # clipped up to the floor: keep detail on tiny ZIPs
+    assert tol[1] == pytest.approx(0.01 * 0.2, rel=1e-3)  # proportional to size (equator)
+    assert tol[2] == pytest.approx(0.003)  # clipped to the ceiling
+    assert list(tol) == sorted(tol)
+
+
+def test_simplification_shrinks_size_by_latitude() -> None:
+    """A degree of longitude is shorter at 65°N, so the same-degree box is 'smaller'."""
+    import numpy as np
+
+    s = db.Simplification(rel=0.01, min_deg=0.0, max_deg=1.0)
+    eq, ak = box(0, 0, 1, 1), box(0, 64.5, 1, 65.5)
+    t_eq, t_ak = s.tolerances(np.array([eq, ak], dtype=object))
+    assert t_ak < t_eq
+
+
+def test_uniform_simplification_is_a_constant_tolerance() -> None:
+    import numpy as np
+
+    s = db.Simplification.uniform(0.002)
+    tol = s.tolerances(np.array([box(0, 0, 0.001, 0.001), box(0, 0, 9, 9)], dtype=object))
+    assert list(tol) == [0.002, 0.002]
+
+
+def test_adaptive_assemble_keeps_detail_on_small_zips_and_simplifies_large_ones() -> None:
+    small = Point(0, 0).buffer(0.005, quad_segs=300)  # ~1 km ZIP, 1200 vertices
+    large = Point(10, 0).buffer(0.5, quad_segs=300)  # ~110 km ZIP, 1200 vertices
+    gdf = db.assemble(
+        _boundaries({"11111": small, "22222": large}),
+        _rel(["11111", "22222"]),
+        pd.DataFrame(columns=["zip", "city"]),
+        simplification=db.Simplification(),
+    )
+    out = gdf.set_index("zip").geometry
+    err_small = out["11111"].hausdorff_distance(small)
+    err_large = out["22222"].hausdorff_distance(large)
+    assert err_small <= 0.0001 + 1e-9  # floor tolerance: tiny ZIPs keep their detail
+    assert err_large <= 0.003 + 1e-9  # ceiling tolerance: error is capped for huge ZIPs
+    assert err_large > 10 * err_small  # ...but the large one is simplified far more coarsely
+    # a 0.003 deg tolerance on a 0.5 deg-radius circle costs ~0.6% of its area, by design
+    assert out["22222"].area == pytest.approx(large.area, rel=0.01)
+
+
+def test_default_simplification_is_adaptive_and_documented() -> None:
+    d = db.DEFAULT_SIMPLIFICATION
+    assert d.rel > 0 and d.min_deg < d.max_deg
