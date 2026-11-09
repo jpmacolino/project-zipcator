@@ -1,8 +1,10 @@
+# ruff: noqa: RUF001
 """Regression tests for the phase 3 QA review (docs/QA_REPORT.md, phase 3)."""
 
 from __future__ import annotations
 
 import copy
+import itertools
 import json
 from pathlib import Path
 
@@ -47,7 +49,7 @@ def test_limiter_spaces_every_call_not_just_the_second() -> None:
         limiter.wait()
         stamps.append(ft.now)
     assert ft.sleeps == [1.0, 1.0, 1.0, 1.0]
-    assert all(b - a >= 1.0 - 1e-9 for a, b in zip(stamps, stamps[1:], strict=False))
+    assert all(b - a >= 1.0 - 1e-9 for a, b in itertools.pairwise(stamps))
 
 
 @responses.activate
@@ -342,9 +344,8 @@ def test_invalid_user_agent_is_not_retried_and_is_logged(
 ) -> None:
     monkeypatch.setenv("ZIPCATOR_USER_AGENT", "bad\r\nX-Injected: 1")
     ft = FakeTime()
-    with caplog.at_level("ERROR", logger="zipcator.geocode"):
-        with pytest.raises(gc.GeocodeServiceError):
-            _census(ft).geocode("x")
+    with caplog.at_level("ERROR", logger="zipcator.geocode"), pytest.raises(gc.GeocodeServiceError):
+        _census(ft).geocode("x")
     assert "ZIPCATOR_USER_AGENT" in caplog.text and ft.sleeps == []
 
 

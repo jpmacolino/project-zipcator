@@ -14,9 +14,10 @@ import math
 import re
 import threading
 import time
+import unicodedata
 from collections import OrderedDict
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol, runtime_checkable
 
 import geopandas as gpd
@@ -31,6 +32,7 @@ CENSUS_URL = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress
 CENSUS_BENCHMARK = "Public_AR_Current"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 TIMEOUT_S = 10.0
+MAX_RETRY_AFTER_S = 30.0
 _TRANSIENT_STATUS = frozenset({429, 500, 502, 503, 504})
 _ENTER_HINT = "Enter an address, a 5-digit ZIP code, or coordinates like 27.9506, -82.4572"
 
@@ -80,9 +82,14 @@ class ParsedInput:
     zip: str | None = None
 
 
-_ZIP_RE = re.compile(r"^(\d{5})(?:-\d{4})?$")
-_NUM = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
+# ASCII digits only: Python's \d also matches Arabic-Indic and other Unicode digits, which would
+# produce a non-ASCII "ZIP" that can never match a ZCTA. Fullwidth digits (typed from a CJK
+# IME) are mapped to ASCII first by the NFKC normalisation in parse_input().
+_ZIP_RE = re.compile(r"^([0-9]{5})(?:-[0-9]{4})?$")
+_NUM = r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)"
 _COORD_RE = re.compile(rf"^({_NUM})\s*(?:,|;|\s)\s*({_NUM})$")
+_DEGREE_RE = re.compile(r"[0-9]\s*°")
+MAX_INPUT_CHARS = 300
 
 
 def parse_input(text: str) -> ParsedInput:
@@ -91,13 +98,22 @@ def parse_input(text: str) -> ParsedInput:
     Two numbers and nothing else are *always* coordinates, so an out-of-range pair such as
     ``"95, 10"`` is an error rather than a nonsensical address lookup.
     """
-    clean = " ".join(str(text).split())
+    if not isinstance(text, str):
+        raise InvalidInputError(_ENTER_HINT)
+    clean = " ".join(unicodedata.normalize("NFKC", text).split())
     if not clean:
         raise InvalidInputError(_ENTER_HINT)
+    if len(clean) > MAX_INPUT_CHARS:
+        raise InvalidInputError(f"Input is too long (the limit is {MAX_INPUT_CHARS} characters)")
+    if _DEGREE_RE.search(clean):
+        raise InvalidInputError(
+            "Use decimal degrees such as 27.9506, -82.4572 "
+            "(degree symbols and N/S/E/W letters are not supported)"
+        )
     if m := _ZIP_RE.match(clean):
         return ParsedInput("zip", clean, zip=m.group(1))
     if m := _COORD_RE.match(clean):
-        lat, lon = float(m.group(1)), float(m.group(2))
+        lat, lon = float(m.group(1)) + 0.0, float(m.group(2)) + 0.0  # + 0.0 turns -0.0 into 0.0
         if not -90 <= lat <= 90:
             raise InvalidInputError(
                 f"Invalid coordinates: latitude must be between -90 and 90 (got {lat:g})"
@@ -150,6 +166,15 @@ _SHARED_LIMITER = RateLimiter(1.0)
 
 
 # ------------------------------------------------------------------------------ HTTP core
+def _retry_after_seconds(resp: requests.Response) -> float | None:
+    """The numeric ``Retry-After`` (seconds), or ``None`` if absent or an HTTP date."""
+    try:
+        value = float(resp.headers.get("Retry-After", ""))
+    except ValueError:
+        return None
+    return value if math.isfinite(value) and value >= 0 else None
+
+
 def _get_json(
     session: requests.Session,
     url: str,
@@ -162,14 +187,24 @@ def _get_json(
     sleeper: Callable[[float], None],
     before_request: Callable[[], None] | None = None,
 ) -> Any:
-    """GET + parse JSON with one retry (exponential backoff) for transient failures."""
-    for attempt in range(retries + 1):
+    """GET + parse JSON with retries (exponential backoff) for transient failures.
+
+    A ``Retry-After`` of up to ``MAX_RETRY_AFTER_S`` seconds replaces the backoff; a longer one
+    means "go away", so we give up instead of hammering the service.
+    """
+    delay: float | None = None
+    for attempt in range(max(0, retries) + 1):
         if attempt:
-            sleeper(backoff * 2 ** (attempt - 1))
+            sleeper(delay if delay is not None else backoff * 2 ** (attempt - 1))
+            delay = None
         if before_request is not None:
             before_request()
         try:
             resp = session.get(url, params=params, headers=headers, timeout=timeout)
+        except requests.exceptions.InvalidHeader as exc:
+            # A configuration error (e.g. CR/LF in ZIPCATOR_USER_AGENT), not a transient fault.
+            logger.error("invalid HTTP header; check ZIPCATOR_USER_AGENT: %s", exc)
+            raise GeocodeServiceError() from exc
         except requests.RequestException as exc:  # timeouts, DNS, resets: transient
             logger.warning(
                 "geocoder request failed (attempt %d): %s", attempt + 1, type(exc).__name__
@@ -177,6 +212,10 @@ def _get_json(
             continue
         if resp.status_code in _TRANSIENT_STATUS:
             logger.warning("geocoder returned HTTP %d (attempt %d)", resp.status_code, attempt + 1)
+            delay = _retry_after_seconds(resp)
+            if delay is not None and delay > MAX_RETRY_AFTER_S:
+                logger.warning("server asked us to wait %.0f s; giving up", delay)
+                raise GeocodeServiceError()
             continue
         if resp.status_code != 200:
             logger.warning("geocoder returned HTTP %d; not retrying", resp.status_code)
@@ -353,10 +392,21 @@ class ChainGeocoder:
         return self.fallback.geocode(query)
 
 
+def _copy(result: GeocodeResult) -> GeocodeResult:
+    """A defensive copy: ``candidates`` is a mutable list that callers must not share."""
+    return replace(result, candidates=list(result.candidates))
+
+
 class CachedGeocoder:
-    """Bounded in-process LRU cache keyed by the normalised query; failures are not cached."""
+    """Bounded in-process LRU cache keyed by the normalised query; failures are not cached.
+
+    ``maxsize=0`` disables caching. Results are copied in and out, so a caller mutating the
+    returned ``candidates`` list cannot corrupt later cache hits.
+    """
 
     def __init__(self, inner: Geocoder, maxsize: int = 256) -> None:
+        if maxsize < 0:
+            raise ValueError(f"maxsize must be >= 0 (got {maxsize})")
         self.inner = inner
         self.maxsize = maxsize
         self._cache: OrderedDict[str, GeocodeResult] = OrderedDict()
@@ -367,13 +417,14 @@ class CachedGeocoder:
         with self._lock:
             if key in self._cache:
                 self._cache.move_to_end(key)
-                return self._cache[key]
+                return _copy(self._cache[key])
         result = self.inner.geocode(query)
-        with self._lock:
-            self._cache[key] = result
-            self._cache.move_to_end(key)
-            while len(self._cache) > self.maxsize:
-                self._cache.popitem(last=False)
+        if self.maxsize:
+            with self._lock:
+                self._cache[key] = _copy(result)
+                self._cache.move_to_end(key)
+                while len(self._cache) > self.maxsize:
+                    self._cache.popitem(last=False)
         return result
 
 
@@ -384,16 +435,42 @@ def default_geocoder(session: requests.Session | None = None) -> Geocoder:
 
 
 # --------------------------------------------------------------------------------- locate
+#: Coarse bounding boxes (south, north, west, east) for the US and its territories, with generous
+#: margins so near-offshore points still reach the friendly "no ZIPs overlap" state. Deliberately
+#: a *box* test: it rejects clearly foreign places (Sydney, London, Tokyo, mid-ocean) but cannot
+#: separate border towns (e.g. Toronto lies inside the CONUS box). Documented in DECISIONS.md.
+_US_BOXES: tuple[tuple[float, float, float, float], ...] = (
+    (23.5, 50.5, -126.5, -65.5),  # contiguous states and near offshore
+    (50.5, 72.5, -180.0, -128.0),  # Alaska, including Utqiagvik
+    (50.5, 55.5, 171.0, 180.0),  # far-western Aleutians, east of the antimeridian
+    (18.0, 23.0, -161.5, -154.0),  # Hawaii
+    (17.0, 19.2, -68.2, -64.0),  # Puerto Rico, US Virgin Islands
+    (12.8, 20.8, 144.0, 146.5),  # Guam, Northern Mariana Islands
+    (-15.0, -13.8, -171.5, -168.0),  # American Samoa
+)
+
+
+def in_us_bounds(lat: float, lon: float) -> bool:
+    """True if (lat, lon) lies in the coarse US/territory bounding boxes."""
+    return any(s <= lat <= n and w <= lon <= e for s, n, w, e in _US_BOXES)
+
+
 def locate(text: str, geocoder: Geocoder, zctas: gpd.GeoDataFrame | None) -> GeocodeResult:
     """Resolve what the user typed to a search center (SPEC §5.1).
 
-    * ``lat, lon`` → used directly (no geocoder);
-    * a bare ZIP → that ZCTA's representative point, labelled as approximate (no geocoder);
-    * anything else → the geocoder.
+    * ``lat, lon`` -> used directly (no geocoder);
+    * a bare ZIP -> that ZCTA's representative point, labelled as approximate (no geocoder);
+    * anything else -> the geocoder.
+
+    Coordinates and geocoder results outside the US raise :class:`OutsideUSError` (SPEC §5.2.5):
+    Census is US-only and Nominatim is restricted by ``countrycodes=us``, so this check is also
+    what catches a swapped lat/lon pair or a stray foreign hit.
     """
     parsed = parse_input(text)
     if parsed.kind == "coords":
         assert parsed.lat is not None and parsed.lon is not None
+        if not in_us_bounds(parsed.lat, parsed.lon):
+            raise OutsideUSError()
         label = f"{parsed.lat}, {parsed.lon}"
         return GeocodeResult(parsed.lat, parsed.lon, label, "coordinates", [])
     if parsed.kind == "zip":
@@ -404,8 +481,14 @@ def locate(text: str, geocoder: Geocoder, zctas: gpd.GeoDataFrame | None) -> Geo
             )
         rows = zctas[zctas["zip"] == parsed.zip]
         if rows.empty:
-            raise AddressNotFoundError(f"ZIP {parsed.zip} is not a known ZIP code (Census ZCTA)")
+            raise AddressNotFoundError(
+                f"ZIP {parsed.zip} has no boundary in the Census ZCTA data (it may be a PO-box "
+                "or single-organization ZIP, or not exist)"
+            )
         row = rows.iloc[0]
         label = f"ZIP {parsed.zip} (approximate center)"
         return GeocodeResult(float(row["intpt_lat"]), float(row["intpt_lon"]), label, "zip", [])
-    return geocoder.geocode(parsed.text)
+    result = geocoder.geocode(parsed.text)
+    if not in_us_bounds(result.lat, result.lon):
+        raise OutsideUSError()
+    return result
