@@ -1,8 +1,57 @@
 # QA report
 
 ## Summary
-<!-- Filled in at the end: test counts per layer, coverage %, bugs found/fixed,
-     golden scenarios verified, open/deferred findings. -->
+
+**State at the end of phase 6.** Every SPEC §9 acceptance criterion is met except where this report
+says a thing could not be verified here (listed under *Open*). Seven independent reviews (one per
+phase 0-5 plus a final whole-project review) found **1 HIGH and 19 MEDIUM** issues; all were fixed
+with regression tests. **27 bugs and test gaps** are logged below with symptom, root cause, fix and
+test name.
+
+**Tests** (default run `uv run pytest` = 699 passed, no network, no data, hermetic):
+
+| layer | marker | tests | notes |
+|---|---|---|---|
+| unit + property | default | 661 | geo, search, geocode, data build/loader, export, CLI, map, UI helpers; `hypothesis` properties |
+| UI (AppTest) | default | 38 | geocoder and data mocked; `st_folium` replaced by a recorder |
+| integration | `data` | 84 | real artifact: smoke, CLI end to end (in-process and real subprocess), **golden scenarios** |
+| benchmarks | `slow` (+ `data`) | 8 | SPEC §6 budgets |
+| visual / real browser | `visual` | 11 | Chromium via Playwright; screenshots reviewed |
+| live | `network` | 5 | polite calls to Census (4) and one Nominatim request; run manually |
+
+**Coverage:** 99.87 % line + branch on `src/zipcator` (gate: 90 %). ruff, ruff format, mypy and the
+1 MB tracked-file gate are clean. The default suite also passes on Python 3.11 and in a **fresh
+clone** whose path contains spaces (README commands only: `uv sync` 6 s, data build 58 s, 33,791
+ZCTAs, an artifact byte-identical in size to the original, app health 200, CLI works, 87 data and
+golden tests and 8 benchmarks pass there).
+
+**CI:** GitHub Actions (ubuntu and windows x Python 3.11 and 3.12) reports `success` for the push at
+`dd585ff` (the README commit) per the public API, and for the earlier pushes `3ae7ea1` and `8ad9749`.
+The final-review commits after `dd585ff` had not been pushed when this was written.
+
+**SPEC §9 checklist**
+
+| # | criterion | status | evidence |
+|---|---|---|---|
+| 1 | fresh clone follows only the README | **met** | fresh-clone run above; README commands exercised by the reviewer; nits fixed |
+| 2 | 8 golden scenarios pass, with independent verification notes | **met** | tables and method below; 50 golden tests |
+| 3 | rural regression demonstrated on real data | **met** | table below (representative point *and* true centroid) |
+| 4 | unit + UI green on CI, coverage >= 90 %, lint/type clean | **met** | CI success on `dd585ff` for all matrix jobs; 99.87 %; clean |
+| 5 | map circle matches the radius; screenshots reviewed | **met** | circle width vs Leaflet scale bar within 4 % in 3 real-browser scenarios; screenshots opened and fixed (bug 24) |
+| 6 | README complete | **met** | all items; every number re-checked by the final review |
+| 7 | no data file > 1 MB, no secrets | **met** | largest blob in history 590 KB; history scanned for keys |
+
+**Open (could not be verified here, or deliberately left):**
+
+* The **Excel-safe CSV** (`="02108"`) was never opened in real Excel; the behaviour is established
+  from knowledge, not from a test (DECISIONS.md). Please confirm once.
+* **Population** (`--with-population`) has only been tested against recorded request/response shapes:
+  the Census API now requires a key and none was available.
+* **Linux** execution is evidenced only by the GitHub Actions run, not locally (no WSL distribution).
+* Deferred by design, with reasons in the phase entries: search-cache `token` mutant, map rebuilt on
+  every rerun, no single-flight for identical concurrent geocodes, 10 s timeouts are per request,
+  state label = primary county's state (13 border ZCTAs), `land_area_sq_mi` vs polygon area, a rebuilt
+  artifact needs an app restart.
 
 ## Bug log
 | # | Phase | Symptom | Root cause | Fix | Regression test |
@@ -32,11 +81,108 @@
 | 23 | 5 | (test gap) removing `html.escape` on city names survived all tests | The old assertion looked at the page source, where JSON encoding already hides `<>&` | Assert the decoded GeoJSON property | `test_city_names_are_html_escaped_in_the_geojson_property_itself` |
 | 24 | 5 | Found by looking at the screenshots: controls hidden in a collapsed sidebar on phones; an oversized branca legend covering the map and labels; sliders showing raw floats ("5.00"); table numbers without fixed decimals; the summary as an enormous heading; barely visible hidden-ZIP outlines; the Deploy button | First-draft layout; branca legend is a large SVG | Controls in the page, compact HTML legend, `format=` on sliders and per-column table formats, bold summary line, dashed 2 px grey outlines, committed `.streamlit/config.toml` | `test_phone_width_with_results_fits_without_horizontal_scroll`, `_assert_map` (legend text, one polygon per ZIP, one marker), `test_min_overlap_with_grey_outlines`, `test_legend_is_present_and_uses_the_colour_scale` |
 | 25 | 5 | Footer claimed an OpenStreetMap Nominatim fallback while it was disabled; the checkbox label truncated at ~1000 px | Static footer text; long label | `footer_markdown(nominatim_enabled)` follows `ZIPCATOR_DISABLE_NOMINATIM`; shorter label | `test_footer_does_not_claim_a_nominatim_fallback_when_it_is_disabled`, `test_footer_follows_the_environment_by_default` |
+| 26 | 6 | The README and the rural-regression comparison said a "centroid-only search finds none"; true only for shapely's representative point. With the true polygon centroid a 10-mile search finds the neighbour 34974 and still misses the ZIP the address is in; the Jordan, MT row proved nothing about centroids | The comparison used `intpt_lat/lon` (representative point) and called it the centroid | README and report reworded; the table shows both variants for 3-20 mi; the Jordan row dropped | `test_9_3_a_single_centre_point_search_misses_the_zip_the_address_is_in`, `test_9_3_the_home_zip_only_appears_for_a_centre_point_search_at_twenty_miles` |
+| 27 | 6 | (test gaps) the golden tests were *skipped* (not failed) when the raw download was missing, and the reference ignored `ZIPCATOR_DATA_DIR`; the Tampa "pinned" test compared against run-time values | `pytest.skip` in a fixture; hard-coded data path; a docstring that promised pinning | The fixture fails with a "run build_data.py" message, the reference honours the env var, and the twelve Tampa overlaps are hard-coded | `test_tampa_overlaps_match_the_pinned_independent_numbers` |
 
 ## Golden scenario verification (SPEC §8.3)
-<!-- For each scenario: inputs, expected results, HOW they were independently verified. -->
 
-## Rural regression: overlap vs centroid-only (SPEC §9.3)
+Expected results are **not** snapshots of this code. Each scenario is computed independently by
+`tests/zc_testkit/reference.py`, which imports nothing from `zipcator` and differs from
+`zipcator.search` at every step:
+
+| | `zipcator.search` | independent reference |
+|---|---|---|
+| polygons | simplified artifact (coverage-simplified, 0.0005 deg) | **unsimplified** raw Census shapefile |
+| circle | `pyproj.Geod.fwd`, 360 vertices | `geographiclib` Direct, 3,600 vertices |
+| equal-area projection | LAEA centred on the point | EPSG:6933 (global cylindrical equal-area) |
+| overlap area | vectorised GeoPandas | shapely, one polygon at a time |
+| home ZIP | `covers` on the simplified polygon | point-in-polygon on the raw polygon |
+
+Results (generated by `uv run python scripts/verify_golden.py`; "raw" = the reference):
+
+| scenario | center | radius | ZIPs (artifact / raw) | home ZIP (artifact / raw) | worst overlap drift | worst area diff | search time |
+|---|---|---|---|---|---|---|---|
+| 1 Dense urban: downtown Tampa, FL | 27.9506, -82.4572 | 5 mi | 12 / 12 | 33602 / 33602 | 0.032 pp | 0.04 % | 47 ms |
+| 2 Rural: Okeechobee, FL | 27.2439, -80.8298 | 10 mi | 2 / 2 | 34972 / 34972 | 0.001 pp | 0.01 % | 31 ms |
+| 3 Coastal: Miami Beach, FL | 25.7907, -80.13 | 5 mi | 15 / 15 | 33139 / 33139 | 0.117 pp | 0.27 % | 31 ms |
+| 4 State border: Texarkana, AR/TX | 33.4418, -94.0377 | 15 mi | 15 / 15 | 71854 / 71854 | 0.009 pp | 0.05 % | 36 ms |
+| 5 Tiny radius: Jordan, MT | 47.3178, -106.9111 | 0.5 mi | 1 / 1 | 59337 / 59337 | 0.000 pp | 0.01 % | 29 ms |
+| 6 Big radius: Orlando, FL | 28.5383, -81.3792 | 100 mi | 484 / 484 | 32801 / 32801 | 0.204 pp | 0.64 % | 140 ms |
+| 7a Non-CONUS: Honolulu, HI | 21.3069, -157.8583 | 10 mi | 25 / 25 | 96813 / 96813 | 0.011 pp | 0.07 % | 36 ms |
+| 7b Non-CONUS: San Juan, PR | 18.4655, -66.1057 | 10 mi | 42 / 42 | 00901 / 00901 | 0.041 pp | 0.31 % | 39 ms |
+| 8 Leading zeros: Boston, MA | 42.3601, -71.0589 | 3 mi | 33 / 33 | 02108 / 02108 | 0.073 pp | 0.13 % | 35 ms |
+
+**What the verification notes rest on**
+
+* ZIP sets are identical in all nine runs (a ZIP present in only one result must be a < 0.05 %
+  sliver); home ZIPs agree with point-in-polygon on the raw shapes; overlap % agrees within
+  0.204 pp (limit asserted: 0.5 pp) and areas within 0.64 % (limit 1 %).
+* **Public facts** asserted per scenario (not derived from code): 33602 is downtown Tampa's ZIP;
+  34972 is Okeechobee's; 33139 is South Beach; Texarkana's ZIPs 71854 (AR) and 75501 (TX) both appear
+  and results span AR and TX; Jordan, MT is 59337 and a 0.5-mile circle lies wholly inside it
+  (checked on the raw polygon); 96813 is downtown Honolulu; 00901 is Old San Juan; Boston's
+  02108/02109/02110/02111 are present as 5-character text with their leading zeros.
+* **Coastal (3):** land inside the circle is 37.8 of 78.5 sq mi, equal to the reference within 1 %,
+  so the Atlantic does not inflate overlap. (Bay water *is* inside the polygons: the 33139 polygon is
+  5.4 sq mi against 2.8 sq mi of land; this is the documented "polygon area, not land area" caveat.)
+* **A third, sampling method** (the final reviewer, sharing only the raw polygons): 60,000
+  area-uniform points per scenario from `pyproj.Geod.fwd`, point-in-polygon against the raw
+  polygons, denominator from geodesic polygon area. Worst z-score 2.6 (Honolulu), mean about 0, ZIP
+  sets all matched (Okeechobee: 17.29 % / 28.23 % sampled vs 17.22 % / 28.25 % from the artifact):
+  consistent with sampling noise, so there is no shared systematic error beyond the Census file itself.
+* **Sensitivity:** with the artifact search radius deliberately wrong by 1 % (5.05 mi) or 2 % the
+  worst overlap drift against the 5-mile reference was 4.9 pp and 9.1 pp, against a 0.5 pp
+  tolerance, so a radius or mile-length error cannot pass. Relabelling NAD83 as WGS84 (the reference
+  does this) versus a proper `to_crs` changes the result by exactly 0.0 pp.
+* **Pinned numbers:** scenario 1's twelve overlaps are hard-coded from the reference
+  (`TAMPA_5MI_PINNED`) and checked against both implementations.
+* **Map inspection:** scenarios 1-3 were screenshotted and the screenshots opened; the real-browser
+  suite also asserts one polygon per result ZIP and that the drawn circle's width equals 2 x radius on
+  the map's own scale bar (within 4 %).
+* **Honesty note:** two of my own expectations were wrong when first run (Hawaii ZIPs are
+  967xx-968xx, Puerto Rico's 006xx-009xx) and were corrected from the true ranges, not loosened; the
+  artifact had agreed with the reference all along.
+
+Reproduce: `uv run pytest -m data tests/integration/test_golden.py` and
+`uv run python scripts/verify_golden.py`.
+
+## Rural regression: overlap vs a single centre point per ZIP (SPEC §9.3)
+
+Real data, Okeechobee, FL (27.2439, -80.8298). The ZIP the address is in (34972) is so large that
+its centre point is far from the address. "Centre point" has two common meanings, so both are shown:
+the shapely **representative point** (a point guaranteed to lie inside the polygon) and the true
+polygon **centroid** (centre of mass, computed in an equal-area projection).
+
+Okeechobee, FL (home ZIP 34972; its neighbour 34974). ZIPs found by each method:
+
+| radius | overlap search | representative point inside the circle | true polygon centroid inside the circle |
+|---|---|---|---|
+| 3 mi | ['34972', '34974'] | none | none |
+| 5 mi | ['34972', '34974'] | none | none |
+| 8 mi | ['34972', '34974'] | none | none |
+| 10 mi | ['34972', '34974'] | none | ['34974'] |
+| 15 mi | ['33857', '34945', '34956', '34972', '34974', '34987'] | ['34974'] | ['34974'] |
+| 20 mi | ['33852', '33857', '34945', '34956', '34972', '34974', '34987'] | ['34974', '34987'] | ['34972', '34974', '34987'] |
+
+Distance from the search point to each ZIP's centre point, and its overlap at 10 mi:
+
+| ZIP | overlap at 10 mi | representative point | true centroid |
+|---|---|---|---|
+| 34972 | 17.2% of its area (149 sq mi) | 20.2 mi | 17.0 mi |
+| 34974 | 28.2% of its area (112 sq mi) | 14.3 mi | 8.2 mi |
+
+* At every radius from 3 to 10 miles the overlap search finds both ZIPs, including the home ZIP.
+  A representative-point search finds **nothing at all** in that range; a true-centroid search finds
+  only the neighbour 34974, and only from 10 miles. Neither ever finds 34972 below 20 miles.
+* This is also what the map shows (`qa/screenshots/02_okeechobee_10mi.png`, reviewed): one huge ZIP
+  with the address inside it, 17 % of it within the circle.
+* **Correction recorded by the final review:** an earlier version of the README and of this section
+  said a "centroid-only search finds none". That held only for the representative point (the
+  comparison used `intpt_lat/lon`), and the Jordan, MT row proved nothing about centroids (a 0.5-mile
+  circle cannot contain any centre). Both were corrected; the claim now matches what is measured.
+* Tests: `test_9_3_a_single_centre_point_search_misses_the_zip_the_address_is_in` (radii 3, 5, 8, 10),
+  `test_9_3_the_home_zip_only_appears_for_a_centre_point_search_at_twenty_miles` and
+  `test_2_rural_large_zips_centroid_only_would_miss_the_home_zip`.
 
 ## Phase reviews
 <!-- One entry per /qa-review run: findings, triage, gate results. -->
@@ -215,3 +361,30 @@ DECISIONS.md). The review was interrupted once by a usage limit and resumed from
 Gates after fixes: ruff lint PASS · ruff format PASS · mypy PASS · pytest PASS (699 passed, 99 %
 coverage; `mapview`/`ui` 100 %) · `pytest -m visual` 11 passed (real Chromium) · `pytest -m data`
 passes · tracked-file size PASS.
+
+### Phase 6 — golden scenarios, benchmarks, README and final review (tag `phase-6`)
+Reviewer verdict: *not yet done* until the report sections existed and the README's centroid claim was
+corrected; **0 HIGH, 2 MEDIUM**. The final reviewer re-ran everything from a clean `git worktree`
+(default suite with a socket/DNS guard that raises on any non-loopback connection, twice, and in
+reversed order: 699 passed each time, so the default run needs no network, no `data/` and no raw
+download), sampled 7 earlier non-red commits (all passed every gate), drove the real app end to end,
+exercised the README commands, scanned the whole history for secrets and large blobs, and checked
+every named regression test in the bug log exists (all 70 do).
+
+| Finding | Triage |
+|---|---|
+| M1 README "centroid-only finds none" only true for the representative point | **Fixed** (bug 26): reworded, both variants measured and tested |
+| M2 QA_REPORT summary, golden table and rural sections empty | **Fixed**: written from the generated verification output |
+| L golden tests can pass with silent skips; reference ignored `ZIPCATOR_DATA_DIR` | **Fixed** (bug 27) |
+| L the Tampa "pinned" test was not pinned | **Fixed** (bug 27) |
+| L README: drift figure scope, "inland water" vs bays, git prerequisite, new terminal after installing uv, bash form of the env var | **Fixed** |
+| L `verify_golden.py` traceback without the raw cache; no pyproject urls/classifiers; 12 public names without docstrings; CI had no timeout/concurrency | **Fixed** |
+| L CI had not run on later commits | **Resolved** for `dd585ff` (success on all matrix jobs per the public API); the final-review commits are not pushed yet |
+| L who pushed: `origin/main` advanced during the build | The agent never pushed or touched remotes (`git remote -v` shows only the original `origin`); pushes were made by the user |
+| L early history rewrite of the first two "initial commit" commits | Predates every agent commit; not a CLAUDE.md violation |
+| L `geo.geodesic_distance_mi` is used only by tests | **Kept**: public API with its own tests |
+| L Excel variant and live population path unverifiable here | **Open** (see Summary) |
+
+Gates after fixes: ruff lint PASS - ruff format PASS - mypy PASS - pytest PASS (699 passed, 99.87 %
+coverage) - `pytest -m data` 92 passed + 1 opt-in skipped - `pytest -m slow` 8 passed - tracked-file
+size PASS - `uv lock --check` OK.

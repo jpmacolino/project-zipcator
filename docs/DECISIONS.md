@@ -313,3 +313,30 @@ Format: date — decision — why — alternatives considered.
 - **Known, accepted:** a browser refresh drops all state (Streamlit); the map HTML is rebuilt per
   rerun; the number box is not step-enforced; there is no keyboard shortcut beyond Enter in the
   form. Colour is never the only encoding: overlap % is in the tooltip and the table.
+
+## Phase 6 — golden scenarios, benchmarks, README (2026-11-08)
+- **Golden expectations come from an independent reference, not from the code under test**
+  (`tests/zc_testkit/reference.py`): unsimplified raw polygons, a geographiclib circle (3,600
+  vertices) and EPSG:6933 instead of the centred LAEA, with shapely intersecting one polygon at a time.
+  It imports nothing from `zipcator`. Tolerances: overlap 0.5 pp (SPEC §8.2), area 1 %, ZIP sets
+  equal up to < 0.05 % slivers; measured worst 0.204 pp / 0.64 %. A deliberate 1 % radius error
+  produces 4.9 pp of drift, so the tolerances are not circular. The reference labels the raw NAD83
+  coordinates as WGS84; a proper `to_crs` changes nothing (PROJ treats it as a null transform).
+- **Nine scenarios, not eight:** scenario 7 is split into Honolulu and San Juan. Centers are
+  well-known locations; per-scenario public facts are asserted in addition to the numeric agreement.
+  Expected ZIP-prefix ranges were taken from the true ranges after two wrong first guesses (Hawaii
+  967xx-968xx; Puerto Rico 006xx-009xx).
+- **Rural regression (SPEC §9.3) is shown for both senses of "centre point"** (shapely representative
+  point and true polygon centroid), because the first write-up claimed "centroid-only finds none",
+  which held only for the representative point. See QA_REPORT.md.
+- **Benchmarks use the spec's own budgets** (cold load <= 5 s measured in a fresh interpreter,
+  100-mile dense-metro search <= 1 s warm, <= 2 s including the one-off spatial-index build, prefilter
+  < 50 ms); measured 1.9 s, 0.15-0.36 s, 0.31 s and a few ms. They fail only on a real regression.
+- **Golden tests fail, never skip,** when the raw download is missing (like the `data` marker
+  policy): a green run must not mean "golden tests silently skipped".
+- **README** states the ZIP = ZCTA sentence first, why overlap beats a centre-point test (with the
+  verified Okeechobee numbers), setup for Windows/macOS/Linux, the CLI and its exit codes, the
+  limitations, the licences and the Nominatim usage note. Every number in it was re-checked by the final
+  review.
+- **Not pushed by the agent.** The agent never pushed or touched remotes; `origin` was already
+  configured in the initial commit and the user pushed.
