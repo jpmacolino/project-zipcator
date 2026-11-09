@@ -58,3 +58,24 @@ def _require_data_artifact(request: pytest.FixtureRequest) -> Iterator[None]:
                 pytrace=False,
             )
     yield
+
+
+@pytest.fixture(autouse=True)
+def _restore_root_logging() -> Iterator[None]:
+    """Undo ``logging.basicConfig(force=True)`` from entry-point tests (scripts/build_data.py).
+
+    It would otherwise leave a handler bound to a stream pytest has already closed on the root
+    logger, so a *later* test's log records fail with 'I/O operation on closed file'.
+    """
+    import logging
+
+    root = logging.getLogger()
+    handlers, level = list(root.handlers), root.level
+    yield
+    for handler in list(root.handlers):
+        if handler not in handlers:
+            root.removeHandler(handler)
+    for handler in handlers:
+        if handler not in root.handlers:
+            root.addHandler(handler)
+    root.setLevel(level)

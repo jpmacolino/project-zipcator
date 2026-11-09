@@ -216,7 +216,7 @@ def test_table_is_clean_no_index_no_nan_text(capsys: pytest.CaptureFixture[str])
     code = cli.main([ADDRESS], geocoder=_Geo(), zctas=zctas)
     out = capsys.readouterr().out
     assert code == 0
-    rows = [ln for ln in out.splitlines()[2:] if ln.strip()]
+    rows = [ln for ln in out.splitlines()[3:] if ln.strip()]  # skip summary, blank, header
     assert rows[0].split()[0] == "33602"  # first token is the ZIP, not a pandas row index
     assert "NaN" not in out and "<NA>" not in out and "None" not in out
 
@@ -244,7 +244,7 @@ def test_repeated_calls_do_not_stack_log_handlers_or_freeze_the_level(
     run([ADDRESS, "-v"], capsys)
     run([ADDRESS], capsys)
     _, _, err = run([ADDRESS, "-v"], capsys)
-    assert err.lower().count("loaded") == 1  # one handler, level re-applied each call
+    assert err.lower().count("loaded") == 1, err  # one handler, level re-applied each call
 
 
 # ---------------------------------------------------------------------------- CSV writing
@@ -409,7 +409,7 @@ def test_display_area_never_shows_zero_for_a_listed_zip() -> None:
     assert export.display_area(0.0) == 0.0
 
 
-def test_a_tiny_sliver_zip_is_shown_as_0_1_percent_and_0_01_sq_mi_on_screen() -> None:
+def test_a_tiny_sliver_zip_is_never_shown_as_zero_percent_on_screen() -> None:
     """Real case: Tampa 10 mi listed a ZIP at '0.0 % / 0.00 sq mi'."""
     zone = box(-100_000, R10 - 100, 100_000, R10 + 100_000)  # a huge ZIP just clipping the circle
     gdf = make_gdf({"33601": box(-1000, -1000, 1000, 1000), "33699": zone})
@@ -417,9 +417,12 @@ def test_a_tiny_sliver_zip_is_shown_as_0_1_percent_and_0_01_sq_mi_on_screen() ->
     raw = res.matches.set_index("zip").loc["33699"]
     assert 0 < raw.overlap_pct < 0.05  # the premise: it would round to 0.0
     shown = export.result_table(res).set_index("ZIP").loc["33699"]
-    assert shown["Overlap %"] == 0.1 and shown["Area in radius (sq mi)"] == 0.01
+    assert shown["Overlap %"] == 0.1  # floor: a listed ZIP is never 0.0
+    assert shown["Area in radius (sq mi)"] == max(round(raw.area_in_radius_sq_mi, 2), 0.01)
+    assert shown["Area in radius (sq mi)"] > 0
     full = export.result_table(res, full=True).set_index("ZIP").loc["33699"]
-    assert 0 < full["Overlap %"] < 0.05 and full["Area in radius (sq mi)"] > 0  # CSV is exact
+    assert 0 < full["Overlap %"] < 0.05  # the CSV keeps the exact (tiny) value
+    assert full["Area in radius (sq mi)"] > 0
 
 
 # ------------------------------------------------------------------------------ summary_line
@@ -448,3 +451,21 @@ def test_pandas_dtype_roundtrip_of_the_plain_csv_keeps_zeros_only_when_asked() -
     text = export.to_csv(find_zips(make_gdf({"02108": box(-1000, -1000, 1000, 1000)}), TAMPA, 10))
     assert pd.read_csv(io.StringIO(text))["ZIP"].tolist() == [2108]  # zeros lost without dtype
     assert pd.read_csv(io.StringIO(text), dtype={"ZIP": str})["ZIP"].tolist() == ["02108"]
+
+
+def test_harden_stream_on_a_terminal_replaces_errors_but_keeps_native_newlines() -> None:
+    class Tty(io.TextIOWrapper):
+        def isatty(self) -> bool:
+            return True
+
+    raw = io.BytesIO()
+    stream = Tty(raw, encoding="cp1252", newline="\r\n")
+    cli._harden_stream(stream)
+    print("東京\nx", file=stream, flush=True)
+    assert raw.getvalue() == b"??\r\nx\r\n"  # replaced, and the console newline untouched
+
+
+def test_harden_stream_leaves_a_closed_stream_alone() -> None:
+    stream = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+    stream.close()
+    cli._harden_stream(stream)  # reconfigure raises ValueError on a closed stream: swallowed
