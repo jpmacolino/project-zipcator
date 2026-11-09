@@ -85,28 +85,70 @@ Format: date — decision — why — alternatives considered.
   artifact replaces an existing one; files are written via temp + rename.
 - **Representative point** is computed from the *simplified* geometry, so it is guaranteed inside
   the stored polygon (checked for all 33,791 rows in the `data` smoke test).
-- **Simplification: size-adaptive, not uniform (SPEC §4.2 study).** Measured on the real data:
-  max overlap-% drift vs the *unsimplified* shapes over 7 scenarios (Tampa 5 mi, Okeechobee
-  rural 10 mi, Miami Beach 5 mi, Boston 3 mi, Honolulu 10 mi, San Juan 10 mi, Orlando 100 mi);
-  "ZIP diff" = ZIPs present in one result but not the other (0 everywhere):
+- **Simplification: coverage simplification, uniform 0.0005° (SPEC §4.2 study; revised after
+  QA phase 2).** Measured on the real data: max overlap-% drift vs the *unsimplified* shapes
+  over 7 scenarios (Tampa 5 mi, Okeechobee rural 10 mi, Miami Beach 5 mi, Boston 3 mi, Honolulu
+  10 mi, San Juan 10 mi, Orlando 100 mi), artifact size
+  with the default (snappy) and the chosen (zstd-19) parquet compression, and the total area by
+  which *neighbouring ZIPs overlap each other* (the raw Census file has 0.000 km²):
 
-  | simplification | parquet MB | load s | Tampa | Okeechobee | Miami Beach | Boston | Honolulu | San Juan | Orlando 100 mi |
-  |---|---|---|---|---|---|---|---|---|---|
-  | uniform 0.0002° | 86.7 | 0.52 | 0.118 | 0.001 | 0.457 | 0.171 | 0.026 | 0.149 | 0.147 |
-  | uniform 0.0005° | 69.7 | 0.28 | 0.201 | 0.006 | 0.317 | **0.960** | 0.188 | 0.446 | 0.422 |
-  | uniform 0.001° | 48.9 | 0.22 | 0.298 | 0.076 | **1.297** | **2.372** | 0.474 | **1.665** | **1.242** |
-  | **adaptive rel 0.01, [0.0001°, 0.003°] (chosen)** | **43.7** | 0.24 | 0.171 | 0.087 | 0.152 | 0.138 | 0.212 | 0.226 | **0.239** |
-  | adaptive rel 0.02, [0.0001°, 0.003°] | 32.3 | 0.17 | 0.522 | 0.123 | 0.457 | 0.617 | 0.474 | 0.358 | 0.558 |
+  | method (tolerance) | MB snappy | MB zstd-19 | neighbour overlap km² | Tampa | Okee. | Miami B. | Boston | Honolulu | San Juan | Orlando 100 mi | worst pp |
+  |---|---|---|---|---|---|---|---|---|---|---|---|
+  | per-polygon `simplify` 0.0005° | 69.7 | 32.2 | **891** | 0.201 | 0.006 | 0.317 | 0.960 | 0.188 | 0.446 | 0.422 | 0.960 |
+  | per-polygon `simplify` 0.001° | 48.9 | 23.9 | **2,329** | 0.298 | 0.076 | 1.297 | 2.372 | 0.474 | 1.665 | 1.242 | **2.372** |
+  | coverage 0.0003° | 93.0 | 41.2 | 0 | 0.007 | 0.000 | 0.025 | 0.024 | 0.001 | 0.022 | 0.014 | 0.025 |
+  | **coverage 0.0005° (chosen)** | 90.5 | **40.2** | **0** | 0.028 | 0.000 | 0.128 | 0.079 | 0.005 | 0.020 | 0.022 | **0.128** |
+  | coverage 0.001° | 77.0 | 35.2 | 0 | 0.129 | 0.005 | 0.416 | 0.524 | 0.111 | 0.217 | 0.560 | 0.560 |
+  | coverage 0.0015° | 58.8 | 28.2 | 0 | 0.324 | 0.006 | 0.681 | 0.422 | 0.100 | 0.395 | 0.339 | 0.681 |
 
-  No uniform tolerance meets both limits (≤ ~50 MB *and* ±1 pp): 0.0005° is 69.7 MB, 0.001° drifts
-  up to 2.4 pp. Drift in percentage points is worst on small urban ZIPs while the vertices sit in
-  large rural ZIPs, so tolerance is now `rel × √area` (latitude-corrected) clipped to
-  [0.0001°, 0.003°]. Chosen `rel = 0.01`: 43.7 MB, worst drift 0.24 pp (4× margin to the ±1 pp
-  limit), load 0.24 s. Reproduce with `uv run python scripts/simplification_study.py`.
-  Alternatives rejected: uniform tolerance (above); `rel = 0.02` (smaller but only 1.6× margin);
-  coordinate rounding/zstd (changes file format for no accuracy benefit; snappy default is fine).
-  Residual risk: drift was measured on 7 scenarios; the phase 6 golden scenarios re-check it.
-- **`BUILD_VERSION = "2"`** (1 → 2 when adaptive simplification replaced the uniform tolerance).
+  Reproduce with `uv run python scripts/simplification_study.py` (~5 min).
+  **History:** the first build used per-polygon Douglas-Peucker (`shapely.simplify`, described
+  as "topology-preserving", which only prevents self-intersection). No *uniform* per-polygon
+  tolerance met both spec limits (0.0005° = 69.7 MB snappy; 0.001° drifts 2.4 pp), so a
+  size-adaptive tolerance (rel × √area, clipped) was adopted: 43.7 MB, worst drift 0.24 pp.
+  The phase 2 QA review then found that *any* per-polygon scheme simplifies the two sides of a
+  shared boundary differently, opening 9,198 km² of pairwise overlap (~0.12 % of area): a
+  search center could fall in a gap (no home ZIP) or in two ZIPs. `shapely.coverage_simplify`
+  simplifies every shared edge once, so the clean partition stays clean (0 km²) **and** it is
+  ~7× more accurate at the same tolerance. With zstd-19 parquet (also fixes size) the adaptive
+  scheme was removed. Chosen 0.0005°: 40.2 MB (≤ ~50 MB), worst drift 0.128 pp on the study
+  scenarios (8× margin to ±1 pp), 0.37 pp worst in the reviewer's 543 independent searches on
+  the earlier adaptive build; the `data` tests re-check drift (≤ 0.5 pp asserted, on six
+  different scenarios; a ZIP present in only one result must be a < 0.05 % sliver), overlap
+  (< 0.01 km²) and total area (±0.1 %) on every run.
+  Alternatives rejected: coverage 0.001° (35 MB but 0.56 pp worst: less margin than needed);
+  per-polygon schemes (gap/overlap defect); coordinate rounding (no accuracy benefit).
+- **zstd (level 19) parquet compression** is the artifact default: about 45 % smaller than snappy
+  for coordinate data; read speed is unaffected (load ≈ 0.3–0.5 s). pyarrow reads it natively.
+- **Requires shapely ≥ 2.1** (`coverage_simplify`); `pyproject.toml` updated.
+- **Build never silently drops ZCTAs.** A ZCTA with no state match (e.g. a new state FIPS) or no
+  polygon area is kept through assembly and *fails the build* with its ZIP named and "Nothing was
+  written" (SPEC §4.3 "every row has a state" would otherwise be vacuous). The real build keeps
+  all 33,791 (checked against the raw shapefile's own ZIP list in the `data` tests).
+- **Loader (`load_zctas`) checks** columns, EPSG:4326, text 5-digit unique ZIPs, known state
+  codes, null/empty geometry, finite in-range `intpt_*` lying *inside* their polygon, and
+  non-negative integer population. It does **not** re-check geometry validity (1.2 s of a 5 s
+  load budget): validity is enforced by the build, and `find_zips` repairs defensively. It also
+  enforces no minimum row count (tiny artifacts are loadable in tests; the build enforces
+  ≥ 33,000).
+- **Raw cache trust:** a cached raw file is reused only if its sidecar URL matches (or it has no
+  sidecar, e.g. hand-placed); metadata records whether each timestamp is `download_sidecar` or
+  `file_mtime`. Corrupt/empty cached files fail with a `--refresh` hint. Content is not hashed.
+- **State label caveat (known, user-visible).** `state` is the state of the primary *county*
+  (SPEC §4.2/D2), so 13 border ZCTAs disagree with their USPS/GeoNames state (e.g. 82930 Evanston
+  is labelled UT, USPS says WY; 79837 Dell City NM vs TX; 86515 Window Rock NM vs AZ; 42223 Fort
+  Campbell TN vs KY). Accepted for v1; to be noted in the README limitations (phase 6).
+- **`land_area_sq_mi` vs polygon area (note for the UI, phase 5).** ALAND excludes inland water
+  that the 1:500k polygons include, so 788 ZCTAs (2.3 %) differ by > 25 % from the projected
+  polygon area (e.g. 34138 Chokoloskee: 0.28 vs 4.25 sq mi). The UI shows only *polygon* areas
+  ("Area in radius") and must not present `land_area_sq_mi` next to them unlabeled.
+- **Known, accepted:** `zcta.parquet` and `metadata.json` are replaced in two atomic steps, so a
+  crash between them can leave stale metadata (very low risk; the footer only shows the date).
+  `config.data_dir()` defaults to `<repo>/data` derived from the package location, which is only
+  right for an editable/checkout install (the documented setup); `ZIPCATOR_DATA_DIR` overrides.
+- **Census population (D4) is still unverified against the live API** (no key available in this
+  environment); covered by mocked tests of the request/response shapes only.
+- **`BUILD_VERSION = "3"`** (1 uniform per-polygon → 2 adaptive per-polygon → 3 coverage).
 - **Raw download timestamps** are stored in `<file>.meta.json` sidecars written at download time;
   files placed in `data/raw` by hand fall back to the file's mtime.
 - **Default ACS vintage 2023** (`B01003_001E`, ACS 5-year); override via `acs_year` in the library.
